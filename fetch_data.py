@@ -137,21 +137,48 @@ def get_players_for_comp_position(comp_slug, position):
 
 
 def fetch_stats_batch(slugs):
-    """Fetch so5Scores for a batch of players using field aliases inside football{}."""
+    """Fetch so5Scores for a batch of players. Auto-splits if complexity is exceeded."""
+    if not slugs:
+        return {}
     stats_fields = "\n".join(STAT_FIELDS)
     aliases = "\n".join(
         f'p{i}: player(slug: "{slug}") {{ so5Scores(last: 20) {{ score playerGameStats {{ {stats_fields} }} }} }}'
         for i, slug in enumerate(slugs)
     )
     query = f"{{ football {{ {aliases} }} }}"
-    data = gql(query)
-    if not data:
-        return {}
-    football = data.get("football") or {}
-    return {
-        slugs[i]: (football.get(f"p{i}") or {}).get("so5Scores") or []
-        for i in range(len(slugs))
-    }
+
+    for attempt in range(5):
+        try:
+            r = requests.post(SORARE_API, json={"query": query}, headers=build_headers(), timeout=60)
+            if r.status_code == 429:
+                wait = 10 * (attempt + 1)
+                print(f"  429 — waiting {wait}s...", flush=True)
+                time.sleep(wait)
+                continue
+            r.raise_for_status()
+            body = r.json()
+            if "errors" in body:
+                msg = body["errors"][0].get("message", "")
+                if "complexity" in msg.lower() and len(slugs) > 1:
+                    # Split batch in half and retry each half
+                    mid = len(slugs) // 2
+                    print(f"  Complexity limit hit, splitting batch {len(slugs)} → {mid}+{len(slugs)-mid}", flush=True)
+                    left = fetch_stats_batch(slugs[:mid])
+                    right = fetch_stats_batch(slugs[mid:])
+                    return {**left, **right}
+                print(f"  GQL error: {msg}", file=sys.stderr, flush=True)
+                return {}
+            football = (body.get("data") or {}).get("football") or {}
+            return {
+                slugs[i]: (football.get(f"p{i}") or {}).get("so5Scores") or []
+                for i in range(len(slugs))
+            }
+        except Exception as exc:
+            if attempt == 4:
+                print(f"  Batch failed: {exc}", file=sys.stderr, flush=True)
+                return {}
+            time.sleep(2 ** attempt)
+    return {}
 
 
 def compute_averages(so5_scores):
