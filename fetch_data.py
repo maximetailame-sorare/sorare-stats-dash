@@ -9,7 +9,11 @@ from collections import defaultdict
 SORARE_API = "https://api.sorare.com/graphql"
 POSITIONS = ["Goalkeeper", "Defender", "Midfielder", "Forward"]
 RANGES = [5, 10, 20]
-REQUEST_DELAY = 1.5  # seconds between requests (avoid 429)
+# With API key: complexity limit is 30 000 → batch 100 players (~200 each)
+# Without API key: complexity limit is 500 → batch 1 player
+BATCH_SIZE_WITH_KEY = 100
+BATCH_SIZE_WITHOUT_KEY = 1
+REQUEST_DELAY = 1.5
 
 STAT_FIELDS = [
     "goals", "goalAssist", "yellowCard", "redCard", "minsPlayed",
@@ -174,25 +178,22 @@ def get_players_for_comp_position(comp_slug, position):
     ]
 
 
-def fetch_player_stats(slug):
-    """Fetch so5Scores for one player. Complexity ~200, safely under 500 limit."""
+def fetch_stats_batch(slugs):
+    """Fetch so5Scores for a batch of players using field aliases inside football{}."""
     stats_fields = "\n".join(STAT_FIELDS)
-    query = f"""
-    {{
-      football {{
-        player(slug: "{slug}") {{
-          so5Scores(last: 20) {{
-            score
-            playerGameStats {{ {stats_fields} }}
-          }}
-        }}
-      }}
-    }}
-    """
+    aliases = "\n".join(
+        f'p{i}: player(slug: "{slug}") {{ so5Scores(last: 20) {{ score playerGameStats {{ {stats_fields} }} }} }}'
+        for i, slug in enumerate(slugs)
+    )
+    query = f"{{ football {{ {aliases} }} }}"
     data = gql(query)
     if not data:
-        return []
-    return ((data.get("football") or {}).get("player") or {}).get("so5Scores") or []
+        return {}
+    football = data.get("football") or {}
+    return {
+        slugs[i]: (football.get(f"p{i}") or {}).get("so5Scores") or []
+        for i in range(len(slugs))
+    }
 
 
 def compute_averages(so5_scores):
@@ -246,16 +247,18 @@ def main():
                 })
                 comp_position_players[(comp_slug, position)].append(slug)
 
-    # Step 2: Fetch stats for all unique players (one query each)
+    # Step 2: Fetch stats for all unique players
     all_slugs = list(player_meta.keys())
     total = len(all_slugs)
-    print(f"\nFetching stats for {total} unique players...", flush=True)
+    batch_size = BATCH_SIZE_WITH_KEY if os.environ.get("SORARE_API_KEY") else BATCH_SIZE_WITHOUT_KEY
+    print(f"\nFetching stats for {total} unique players (batch size: {batch_size})...", flush=True)
     player_stats = {}
-    for i, slug in enumerate(all_slugs):
-        if i % 50 == 0:
-            print(f"  {i}/{total}...", flush=True)
-        scores = fetch_player_stats(slug)
-        player_stats[slug] = compute_averages(scores)
+    for i in range(0, total, batch_size):
+        batch = all_slugs[i: i + batch_size]
+        print(f"  {i}/{total}...", flush=True)
+        results = fetch_stats_batch(batch)
+        for slug, scores in results.items():
+            player_stats[slug] = compute_averages(scores)
         time.sleep(REQUEST_DELAY)
 
     # Step 3: Build final player list (one entry per player×competition×position)
