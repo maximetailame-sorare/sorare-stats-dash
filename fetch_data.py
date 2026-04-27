@@ -8,43 +8,54 @@ SORARE_API = "https://api.sorare.com/graphql"
 
 POSITIONS = ["Goalkeeper", "Defender", "Midfielder", "Forward"]
 
-# Used only if the API competitions query fails
-COMPETITIONS_FALLBACK = {
-    "premier-league-gb-eng": "Premier League",
-    "laliga-es-esp": "La Liga",
-    "bundesliga-de-deu": "Bundesliga",
-    "ligue-1-fr-fra": "Ligue 1",
-    "eredivisie-nl-nld": "Eredivisie",
-    "primeira-liga-pt-prt": "Primeira Liga",
-    "jupiler-pro-league-be-bel": "Jupiler Pro League",
-    "super-lig-tr-tur": "Süper Lig",
-    "scottish-premiership-gb-sct": "Scottish Premiership",
-    "championship-gb-eng": "Championship",
-    "2-bundesliga-de-deu": "2. Bundesliga",
-    "ligue-2-fr-fra": "Ligue 2",
-    "superliga-dk-dnk": "Superliga",
-    "allsvenskan-se-swe": "Allsvenskan",
-    "eliteserien-no-nor": "Eliteserien",
-    "ekstraklasa-pl-pol": "Ekstraklasa",
-    "super-league-gr-grc": "Super League Greece",
-    "major-league-soccer-us-usa": "MLS",
-    "liga-mx-mx-mex": "Liga MX",
-    "brasileirao-br-bra": "Brasileirão",
-    "primera-division-ar-arg": "Primera División",
-    "j1-league-jp-jpn": "J1 League",
-    "k-league-1-kr-kor": "K League 1",
-    "pro-league-sa-sau": "Saudi Pro League",
-    "chinese-super-league-cn-chn": "Chinese Super League",
-    "uefa-champions-league": "Champions League",
-    "uefa-europa-league": "Europa League",
-    "uefa-conference-league": "Conference League",
+# Slugs/keywords to exclude from dynamic competition discovery (cups, friendlies, etc.)
+COMPETITION_EXCLUDE = {
+    "friendl", "trophy", "shield", "copa-", "taca", "trofeo", "coupe-",
+    "coppa-", "-pokal", "play-off", "super-cup", "supercopa", "open-cup",
+    "hybrid", "asia-trophy", "tipsport", "emirates", "emperor-cup",
+    "community", "torneos", "league-cup", "leagues-cup", "j-league-cup",
+    "canadian-championship", "club-world-cup", "libertadores", "3-lig",
+    "efl-trophy", "fa-cup", "concacaf",
 }
 
-COMPETITIONS_QUERY = """
+# Used only if the dynamic discovery fails entirely
+COMPETITIONS_FALLBACK = {
+    "premier-league-gb-eng": "Premier League",
+    "football-league-championship": "EFL Championship",
+    "bundesliga-de": "Bundesliga",
+    "2-bundesliga": "2. Bundesliga",
+    "laliga-es": "La Liga",
+    "segunda-division-es": "La Liga 2",
+    "ligue-1-fr": "Ligue 1",
+    "ligue-2-fr": "Ligue 2",
+    "serie-a-it": "Serie A",
+    "primera-liga-pt": "Primeira Liga",
+    "spor-toto-super-lig": "Süper Lig",
+    "premiership-gb-sct": "Scottish Premiership",
+    "austrian-bundesliga": "Austrian Bundesliga",
+    "1-hnl": "SuperSport HNL",
+    "superliga-argentina-de-futbol": "Superliga Argentina",
+    "mlspa": "Major League Soccer",
+    "liga-pro": "Liga Pro",
+    "j1-100-year-vision-league": "J1 League",
+    "uefa-champions-league": "Champions League",
+    "uefa-europa-league": "Europa League",
+    "uefa-europa-conference-league": "Europa Conference League",
+}
+
+DISCOVER_QUERY = """
 {
-  competitions(sport: FOOTBALL) {
-    slug
-    displayName
+  searchPlayers(advancedFilters: "sport:football", pageSize: 500) {
+    hits {
+      player {
+        activeClub {
+          activeCompetitions {
+            slug
+            displayName
+          }
+        }
+      }
+    }
   }
 }
 """
@@ -93,23 +104,35 @@ def build_headers() -> dict:
     return headers
 
 
+def _is_league(slug: str) -> bool:
+    return not any(kw in slug for kw in COMPETITION_EXCLUDE)
+
+
 def get_competitions() -> dict:
     try:
         response = requests.post(
             SORARE_API,
-            json={"query": COMPETITIONS_QUERY},
+            json={"query": DISCOVER_QUERY},
             headers=build_headers(),
-            timeout=30,
+            timeout=60,
         )
         response.raise_for_status()
         body = response.json()
-        nodes = body.get("data", {}).get("competitions") or []
-        if nodes:
-            result = {c["slug"]: c["displayName"] for c in nodes if c.get("slug")}
-            print(f"Fetched {len(result)} competitions from API")
-            return result
+        hits = body.get("data", {}).get("searchPlayers", {}).get("hits") or []
+
+        found = {}
+        for hit in hits:
+            club = (hit.get("player") or {}).get("activeClub") or {}
+            for c in club.get("activeCompetitions") or []:
+                slug = c.get("slug", "")
+                if slug and _is_league(slug):
+                    found[slug] = c["displayName"]
+
+        if found:
+            print(f"Discovered {len(found)} competitions from API")
+            return found
     except Exception as exc:
-        print(f"Could not fetch competitions from API ({exc}), using fallback list", file=sys.stderr)
+        print(f"Could not discover competitions ({exc}), using fallback list", file=sys.stderr)
     return COMPETITIONS_FALLBACK
 
 
