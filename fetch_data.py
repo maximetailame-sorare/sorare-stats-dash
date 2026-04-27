@@ -1,14 +1,48 @@
 import json
 import os
 import sys
+import time
 import requests
 from datetime import datetime
+from collections import defaultdict
 
 SORARE_API = "https://api.sorare.com/graphql"
-
 POSITIONS = ["Goalkeeper", "Defender", "Midfielder", "Forward"]
+RANGES = [5, 10, 20]
+BATCH_SIZE = 10  # players per stats query (stays under complexity limit without API key)
+REQUEST_DELAY = 0.15  # seconds between requests
 
-# Slugs/keywords to exclude from dynamic competition discovery (cups, friendlies, etc.)
+STAT_FIELDS = [
+    "goals", "goalAssist", "yellowCard", "redCard", "minsPlayed",
+    "cleanSheet", "saves", "totalPass", "accuratePass", "totalTackle",
+    "interceptionWon", "wonContest", "duelWon", "lostCorners",
+    "errorLeadToGoal", "ownGoals", "penaltyConceded", "penaltyKickMissed",
+    "penaltySave",
+]
+
+STAT_LABELS = {
+    "score": "Score SO5",
+    "goals": "Buts",
+    "goalAssist": "Passes D.",
+    "yellowCard": "Carton J.",
+    "redCard": "Carton R.",
+    "minsPlayed": "Minutes",
+    "cleanSheet": "Clean Sheet",
+    "saves": "Arrêts",
+    "totalPass": "Passes tot.",
+    "accuratePass": "Passes réussies",
+    "totalTackle": "Tacles",
+    "interceptionWon": "Interceptions",
+    "wonContest": "Duels gagnés",
+    "duelWon": "Duels",
+    "lostCorners": "Corners perdus",
+    "errorLeadToGoal": "Erreurs menant au but",
+    "ownGoals": "CSC",
+    "penaltyConceded": "Penaltys concédés",
+    "penaltyKickMissed": "Penaltys manqués",
+    "penaltySave": "Penaltys arrêtés",
+}
+
 COMPETITION_EXCLUDE = {
     "friendl", "trophy", "shield", "copa-", "taca", "trofeo", "coupe-",
     "coppa-", "-pokal", "play-off", "super-cup", "supercopa", "open-cup",
@@ -18,7 +52,6 @@ COMPETITION_EXCLUDE = {
     "efl-trophy", "fa-cup", "concacaf",
 }
 
-# Used only if the dynamic discovery fails entirely
 COMPETITIONS_FALLBACK = {
     "premier-league-gb-eng": "Premier League",
     "football-league-championship": "EFL Championship",
@@ -33,10 +66,8 @@ COMPETITIONS_FALLBACK = {
     "spor-toto-super-lig": "Süper Lig",
     "premiership-gb-sct": "Scottish Premiership",
     "austrian-bundesliga": "Austrian Bundesliga",
-    "1-hnl": "SuperSport HNL",
     "superliga-argentina-de-futbol": "Superliga Argentina",
     "mlspa": "Major League Soccer",
-    "liga-pro": "Liga Pro",
     "j1-100-year-vision-league": "J1 League",
     "uefa-champions-league": "Champions League",
     "uefa-europa-league": "Europa League",
@@ -49,45 +80,7 @@ DISCOVER_QUERY = """
     hits {
       player {
         activeClub {
-          activeCompetitions {
-            slug
-            displayName
-          }
-        }
-      }
-    }
-  }
-}
-"""
-
-QUERY = """
-query SearchPlayers($filters: String!) {
-  searchPlayers(
-    advancedFilters: $filters,
-    pageSize: 100,
-  ) {
-    nbHits
-    hits {
-      player {
-        slug
-        displayName
-        position
-        activeClub {
-          name
-        }
-        averageStats(limit: LAST_10, type: WON_CONTEST) {
-          score
-          goals
-          goalAssist
-          cleanSheet
-          yellowCard
-          redCard
-          minsPlayed
-          saves
-          ownGoals
-          errorLeadToGoal
-          penaltySaved
-          penaltyMiss
+          activeCompetitions { slug displayName }
         }
       }
     }
@@ -96,7 +89,7 @@ query SearchPlayers($filters: String!) {
 """
 
 
-def build_headers() -> dict:
+def build_headers():
     headers = {"Content-Type": "application/json"}
     api_key = os.environ.get("SORARE_API_KEY")
     if api_key:
@@ -104,164 +97,279 @@ def build_headers() -> dict:
     return headers
 
 
-def _is_league(slug: str) -> bool:
+def gql(query, retries=3):
+    for attempt in range(retries):
+        try:
+            r = requests.post(SORARE_API, json={"query": query}, headers=build_headers(), timeout=30)
+            r.raise_for_status()
+            body = r.json()
+            if "errors" in body:
+                msg = body["errors"][0].get("message", "")
+                print(f"  GQL error: {msg}", file=sys.stderr)
+                return None
+            return body.get("data")
+        except Exception as exc:
+            if attempt == retries - 1:
+                print(f"  Request failed: {exc}", file=sys.stderr)
+                return None
+            time.sleep(1)
+    return None
+
+
+def is_league(slug):
     return not any(kw in slug for kw in COMPETITION_EXCLUDE)
 
 
-def get_competitions() -> dict:
-    try:
-        response = requests.post(
-            SORARE_API,
-            json={"query": DISCOVER_QUERY},
-            headers=build_headers(),
-            timeout=60,
-        )
-        response.raise_for_status()
-        body = response.json()
-        hits = body.get("data", {}).get("searchPlayers", {}).get("hits") or []
-
+def get_competitions():
+    data = gql(DISCOVER_QUERY)
+    if data:
+        hits = data.get("searchPlayers", {}).get("hits") or []
         found = {}
         for hit in hits:
             club = (hit.get("player") or {}).get("activeClub") or {}
             for c in club.get("activeCompetitions") or []:
                 slug = c.get("slug", "")
-                if slug and _is_league(slug):
+                if slug and is_league(slug):
                     found[slug] = c["displayName"]
-
         if found:
-            print(f"Discovered {len(found)} competitions from API")
+            print(f"Discovered {len(found)} competitions")
             return found
-    except Exception as exc:
-        print(f"Could not discover competitions ({exc}), using fallback list", file=sys.stderr)
+    print("Using fallback competitions list", file=sys.stderr)
     return COMPETITIONS_FALLBACK
 
 
-def fetch_players(position: str, competition: str) -> list:
-    filters = f"sport:football AND active_competitions:{competition} AND position:{position}"
+def get_players_for_comp_position(comp_slug, position):
+    query = f"""
+    {{
+      searchPlayers(
+        advancedFilters: "sport:football AND active_competitions:{comp_slug} AND position:{position}",
+        pageSize: 100
+      ) {{
+        hits {{
+          player {{
+            slug
+            displayName
+            activeClub {{ name }}
+          }}
+        }}
+      }}
+    }}
+    """
+    data = gql(query)
+    if not data:
+        return []
+    hits = data.get("searchPlayers", {}).get("hits") or []
+    return [
+        {
+            "slug": h["player"]["slug"],
+            "name": h["player"].get("displayName") or h["player"]["slug"],
+            "club": (h["player"].get("activeClub") or {}).get("name", ""),
+        }
+        for h in hits
+        if h.get("player", {}).get("slug")
+    ]
 
-    response = requests.post(
-        SORARE_API,
-        json={"query": QUERY, "variables": {"filters": filters}},
-        headers=build_headers(),
-        timeout=30,
+
+def fetch_stats_batch(slugs):
+    """Fetch last 20 so5Scores for up to BATCH_SIZE players in one query."""
+    stats_fields = "\n".join(STAT_FIELDS)
+    aliases = "\n".join(
+        f'p{i}: player(slug: "{slug}") {{ so5Scores(last: 20) {{ score playerGameStats {{ {stats_fields} }} }} }}'
+        for i, slug in enumerate(slugs)
     )
-    response.raise_for_status()
+    query = f"{{ football {{ {aliases} }} }}"
+    data = gql(query)
+    if not data:
+        return {}
+    football = data.get("football") or {}
+    return {
+        slugs[i]: football.get(f"p{i}", {}).get("so5Scores") or []
+        for i in range(len(slugs))
+    }
 
-    body = response.json()
-    if "errors" in body:
-        print(f"  GraphQL errors: {body['errors']}", file=sys.stderr)
 
-    return body.get("data", {}).get("searchPlayers", {}).get("hits", [])
+def compute_averages(so5_scores):
+    """Returns {5: {...}, 10: {...}, 20: {...}} averages from game stats."""
+    played = [
+        g["playerGameStats"]
+        for g in so5_scores
+        if g.get("playerGameStats") and (g["playerGameStats"].get("minsPlayed") or 0) > 0
+    ]
+    sorare_scores = [g["score"] for g in so5_scores if g.get("score") is not None]
 
-
-def round_stat(value):
-    if value is None:
-        return None
-    try:
-        return round(float(value), 2)
-    except (TypeError, ValueError):
-        return None
+    result = {}
+    for n in RANGES:
+        games = played[:n]
+        scores = sorare_scores[:n]
+        if not games and not scores:
+            result[n] = None
+            continue
+        stats = {}
+        if scores:
+            stats["score"] = round(sum(scores) / len(scores), 2)
+        for field in STAT_FIELDS:
+            values = [g[field] for g in games if g.get(field) is not None]
+            stats[field] = round(sum(values) / len(values), 2) if values else None
+        result[n] = stats
+    return result
 
 
 def main():
-    all_players = []
     competitions = get_competitions()
+
+    # Step 1: Collect all (player, comp, position) entries
+    # slug -> { name, club, comps: [{comp_slug, comp_name, position}] }
+    player_meta = {}
+    # comp_position -> [slug, ...]
+    comp_position_players = defaultdict(list)
 
     for comp_slug, comp_name in competitions.items():
         for position in POSITIONS:
-            print(f"Fetching {position}s — {comp_name}...")
-            try:
-                hits = fetch_players(position, comp_slug)
-                for hit in hits:
-                    player = hit.get("player") or {}
-                    if not player.get("slug"):
-                        continue
+            print(f"Listing {position}s — {comp_name}...")
+            players = get_players_for_comp_position(comp_slug, position)
+            time.sleep(REQUEST_DELAY)
+            for p in players:
+                slug = p["slug"]
+                if slug not in player_meta:
+                    player_meta[slug] = {"name": p["name"], "club": p["club"], "comps": []}
+                player_meta[slug]["comps"].append({
+                    "comp_slug": comp_slug,
+                    "comp_name": comp_name,
+                    "position": position,
+                })
+                comp_position_players[(comp_slug, position)].append(slug)
 
-                    stats = player.get("averageStats") or {}
-                    club = (player.get("activeClub") or {}).get("name", "")
+    # Step 2: Fetch stats for all unique players
+    all_slugs = list(player_meta.keys())
+    print(f"\nFetching stats for {len(all_slugs)} unique players...")
+    player_stats = {}
+    for i in range(0, len(all_slugs), BATCH_SIZE):
+        batch = all_slugs[i: i + BATCH_SIZE]
+        print(f"  Stats batch {i // BATCH_SIZE + 1}/{(len(all_slugs) + BATCH_SIZE - 1) // BATCH_SIZE}...")
+        stats = fetch_stats_batch(batch)
+        for slug, scores in stats.items():
+            player_stats[slug] = compute_averages(scores)
+        time.sleep(REQUEST_DELAY)
 
-                    all_players.append({
-                        "slug": player["slug"],
-                        "name": player.get("displayName") or player["slug"],
-                        "position": position,
-                        "competition_slug": comp_slug,
-                        "competition_name": comp_name,
-                        "club": club,
-                        "score": round_stat(stats.get("score")),
-                        "goals": round_stat(stats.get("goals")),
-                        "assists": round_stat(stats.get("goalAssist")),
-                        "clean_sheet": round_stat(stats.get("cleanSheet")),
-                        "saves": round_stat(stats.get("saves")),
-                        "yellow_cards": round_stat(stats.get("yellowCard")),
-                        "red_cards": round_stat(stats.get("redCard")),
-                        "mins_played": round_stat(stats.get("minsPlayed")),
-                    })
-            except Exception as exc:
-                print(f"  Error: {exc}", file=sys.stderr)
+    # Step 3: Build final player list (one entry per player×competition×position)
+    all_players = []
+    for slug, meta in player_meta.items():
+        avgs = player_stats.get(slug, {})
+        for comp_info in meta["comps"]:
+            all_players.append({
+                "slug": slug,
+                "name": meta["name"],
+                "club": meta["club"],
+                "position": comp_info["position"],
+                "comp_slug": comp_info["comp_slug"],
+                "comp_name": comp_info["comp_name"],
+                "stats": {str(n): avgs.get(n) for n in RANGES},
+            })
 
-    return all_players
+    return all_players, competitions
 
 
-def generate_html(players: list, last_updated: str) -> str:
-    data_json = json.dumps({"last_updated": last_updated, "players": players}, ensure_ascii=False)
+def generate_html(players, competitions, last_updated):
+    data_json = json.dumps({
+        "last_updated": last_updated,
+        "players": players,
+        "stat_labels": STAT_LABELS,
+    }, ensure_ascii=False)
 
-    competitions = {p["competition_slug"]: p["competition_name"] for p in players}
-    comp_options = "\n".join(
+    comp_buttons = "\n".join(
         f'<button class="filter-btn comp-btn" data-value="{slug}">{name}</button>'
         for slug, name in sorted(competitions.items(), key=lambda x: x[1])
     )
 
+    all_stats = ["score"] + STAT_FIELDS
+    stat_labels_js = json.dumps(STAT_LABELS)
+
     return f"""<!DOCTYPE html>
 <html lang="fr">
 <head>
-  <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
   <title>Sorare Stats Dashboard</title>
   <style>
-    * {{ box-sizing: border-box; margin: 0; padding: 0; }}
-    body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: #0f172a; color: #e2e8f0; min-height: 100vh; }}
-    header {{ background: #1e293b; border-bottom: 1px solid #334155; padding: 20px 32px; display: flex; align-items: center; justify-content: space-between; }}
-    header h1 {{ font-size: 1.4rem; font-weight: 700; color: #f1f5f9; }}
-    #last-updated {{ font-size: 0.78rem; color: #64748b; }}
-    .controls {{ padding: 24px 32px 0; }}
-    .filter-group {{ margin-bottom: 16px; display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }}
-    .filter-label {{ font-size: 0.75rem; font-weight: 600; color: #94a3b8; text-transform: uppercase; letter-spacing: .05em; min-width: 100px; }}
-    .filter-btn {{ background: #1e293b; border: 1px solid #334155; color: #94a3b8; padding: 6px 14px; border-radius: 6px; cursor: pointer; font-size: 0.82rem; transition: all .15s; }}
-    .filter-btn:hover {{ border-color: #6366f1; color: #a5b4fc; }}
-    .filter-btn.active {{ background: #6366f1; border-color: #6366f1; color: #fff; font-weight: 600; }}
-    .search-wrap {{ padding: 16px 32px 0; }}
-    #search {{ background: #1e293b; border: 1px solid #334155; color: #e2e8f0; padding: 8px 14px; border-radius: 6px; font-size: 0.9rem; width: 280px; }}
-    #search::placeholder {{ color: #475569; }}
-    #search:focus {{ outline: none; border-color: #6366f1; }}
-    .table-wrap {{ padding: 24px 32px; overflow-x: auto; }}
-    table {{ width: 100%; border-collapse: collapse; font-size: 0.875rem; }}
-    thead tr {{ background: #1e293b; }}
-    th {{ padding: 10px 14px; text-align: left; color: #94a3b8; font-weight: 600; font-size: 0.75rem; text-transform: uppercase; letter-spacing: .05em; white-space: nowrap; cursor: pointer; user-select: none; }}
-    th:hover {{ color: #c7d2fe; }}
-    th .sort-arrow {{ margin-left: 4px; opacity: 0.4; }}
-    th.sorted .sort-arrow {{ opacity: 1; color: #818cf8; }}
-    td {{ padding: 10px 14px; border-bottom: 1px solid #1e293b; white-space: nowrap; }}
-    tr:hover td {{ background: #1e293b88; }}
-    .badge {{ display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 0.72rem; font-weight: 600; }}
-    .pos-Goalkeeper {{ background: #164e63; color: #67e8f9; }}
-    .pos-Defender {{ background: #14532d; color: #86efac; }}
-    .pos-Midfielder {{ background: #312e81; color: #a5b4fc; }}
-    .pos-Forward {{ background: #7f1d1d; color: #fca5a5; }}
-    .score {{ font-weight: 700; color: #f8fafc; }}
-    .score.high {{ color: #4ade80; }}
-    .score.mid {{ color: #facc15; }}
-    .score.low {{ color: #f87171; }}
-    #count {{ padding: 0 32px 8px; font-size: 0.8rem; color: #64748b; }}
-    .no-data {{ text-align: center; padding: 60px; color: #475569; }}
+    *{{box-sizing:border-box;margin:0;padding:0}}
+    body{{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#0f172a;color:#e2e8f0;min-height:100vh}}
+    header{{background:#1e293b;border-bottom:1px solid #334155;padding:18px 28px;display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:12px}}
+    header h1{{font-size:1.3rem;font-weight:700;color:#f1f5f9}}
+    #last-updated{{font-size:0.75rem;color:#64748b}}
+    .tabs{{display:flex;gap:0;border-bottom:1px solid #334155;background:#1e293b;padding:0 28px}}
+    .tab{{padding:12px 20px;cursor:pointer;font-size:0.85rem;font-weight:600;color:#64748b;border-bottom:2px solid transparent;transition:all .15s}}
+    .tab.active{{color:#818cf8;border-bottom-color:#818cf8}}
+    .tab-content{{display:none}}.tab-content.active{{display:block}}
+    .controls{{padding:20px 28px 0;display:flex;flex-direction:column;gap:12px}}
+    .filter-group{{display:flex;align-items:center;gap:8px;flex-wrap:wrap}}
+    .filter-label{{font-size:0.72rem;font-weight:700;color:#94a3b8;text-transform:uppercase;letter-spacing:.06em;min-width:90px}}
+    .filter-btn{{background:#1e293b;border:1px solid #334155;color:#94a3b8;padding:5px 12px;border-radius:5px;cursor:pointer;font-size:0.8rem;transition:all .15s}}
+    .filter-btn:hover{{border-color:#6366f1;color:#a5b4fc}}
+    .filter-btn.active{{background:#6366f1;border-color:#6366f1;color:#fff;font-weight:600}}
+    .range-btn{{border-radius:5px}}
+    .search-wrap{{padding:16px 28px 0}}
+    #player-search{{background:#1e293b;border:1px solid #334155;color:#e2e8f0;padding:8px 14px;border-radius:6px;font-size:0.9rem;width:320px}}
+    #player-search:focus{{outline:none;border-color:#6366f1}}
+    .aggregate-box{{margin:16px 28px 0;background:#1e293b;border:1px solid #334155;border-radius:8px;padding:16px 20px}}
+    .aggregate-box h3{{font-size:0.8rem;font-weight:700;color:#94a3b8;text-transform:uppercase;letter-spacing:.05em;margin-bottom:12px}}
+    .agg-stats{{display:flex;flex-wrap:wrap;gap:10px}}
+    .agg-stat{{background:#0f172a;border-radius:6px;padding:8px 12px;min-width:100px}}
+    .agg-stat .label{{font-size:0.68rem;color:#64748b;text-transform:uppercase;letter-spacing:.04em}}
+    .agg-stat .value{{font-size:1.1rem;font-weight:700;color:#e2e8f0;margin-top:2px}}
+    .agg-stat .value.high{{color:#4ade80}}.agg-stat .value.mid{{color:#facc15}}.agg-stat .value.low{{color:#f87171}}
+    #group-count{{padding:12px 28px 0;font-size:0.85rem;color:#94a3b8;font-style:italic}}
+    #player-count{{padding:8px 28px 0;font-size:0.78rem;color:#64748b}}
+    .table-wrap{{padding:16px 28px 28px;overflow-x:auto}}
+    table{{width:100%;border-collapse:collapse;font-size:0.82rem}}
+    thead tr{{background:#1e293b}}
+    th{{padding:9px 12px;text-align:left;color:#94a3b8;font-weight:600;font-size:0.7rem;text-transform:uppercase;letter-spacing:.05em;white-space:nowrap;cursor:pointer;user-select:none}}
+    th:hover{{color:#c7d2fe}}
+    th .arr{{margin-left:3px;opacity:.4}}
+    th.sorted .arr{{opacity:1;color:#818cf8}}
+    td{{padding:8px 12px;border-bottom:1px solid #1e293b;white-space:nowrap}}
+    tr:hover td{{background:#1e293b66}}
+    .badge{{display:inline-block;padding:2px 7px;border-radius:4px;font-size:0.68rem;font-weight:700}}
+    .pos-Goalkeeper{{background:#164e63;color:#67e8f9}}
+    .pos-Defender{{background:#14532d;color:#86efac}}
+    .pos-Midfielder{{background:#312e81;color:#a5b4fc}}
+    .pos-Forward{{background:#7f1d1d;color:#fca5a5}}
+    .score-val{{font-weight:700}}
+    .high{{color:#4ade80}}.mid{{color:#facc15}}.low{{color:#f87171}}
+    .no-data{{text-align:center;padding:60px;color:#475569}}
+    .player-card{{margin:16px 28px;background:#1e293b;border-radius:8px;padding:20px}}
+    .player-card h2{{font-size:1.1rem;font-weight:700;color:#f1f5f9;margin-bottom:4px}}
+    .player-card .meta{{font-size:0.8rem;color:#64748b;margin-bottom:16px}}
+    .range-tabs{{display:flex;gap:6px;margin-bottom:16px}}
+    .range-tab{{padding:5px 14px;border-radius:5px;cursor:pointer;font-size:0.8rem;font-weight:600;background:#0f172a;border:1px solid #334155;color:#64748b;transition:all .15s}}
+    .range-tab.active{{background:#6366f1;border-color:#6366f1;color:#fff}}
+    .stats-grid{{display:grid;grid-template-columns:repeat(auto-fill,minmax(130px,1fr));gap:8px}}
+    .stat-card{{background:#0f172a;border-radius:6px;padding:10px 12px}}
+    .stat-card .slabel{{font-size:0.68rem;color:#64748b;text-transform:uppercase;letter-spacing:.04em}}
+    .stat-card .sval{{font-size:1.15rem;font-weight:700;color:#e2e8f0;margin-top:3px}}
+    .empty-state{{text-align:center;padding:60px 28px;color:#475569}}
   </style>
 </head>
 <body>
-  <header>
-    <h1>Sorare Stats Dashboard</h1>
-    <span id="last-updated"></span>
-  </header>
 
+<header>
+  <h1>Sorare Stats Dashboard</h1>
+  <span id="last-updated"></span>
+</header>
+
+<div class="tabs">
+  <div class="tab active" data-tab="group">Vue groupe</div>
+  <div class="tab" data-tab="player">Vue joueur</div>
+</div>
+
+<!-- GROUP VIEW -->
+<div id="tab-group" class="tab-content active">
   <div class="controls">
+    <div class="filter-group">
+      <span class="filter-label">Range</span>
+      <button class="filter-btn range-btn active" data-range="10">10 matchs</button>
+      <button class="filter-btn range-btn" data-range="5">5 matchs</button>
+      <button class="filter-btn range-btn" data-range="20">20 matchs</button>
+    </div>
     <div class="filter-group">
       <span class="filter-label">Poste</span>
       <button class="filter-btn pos-btn active" data-value="all">Tous</button>
@@ -273,164 +381,284 @@ def generate_html(players: list, last_updated: str) -> str:
     <div class="filter-group">
       <span class="filter-label">Championnat</span>
       <button class="filter-btn comp-btn active" data-value="all">Tous</button>
-      {comp_options}
+      {comp_buttons}
     </div>
   </div>
 
-  <div class="search-wrap">
-    <input id="search" type="text" placeholder="Rechercher un joueur ou un club…" />
-  </div>
+  <div id="group-count"></div>
 
-  <div id="count"></div>
+  <div class="aggregate-box" id="agg-box">
+    <h3 id="agg-title">Moyennes du groupe</h3>
+    <div class="agg-stats" id="agg-stats"></div>
+  </div>
 
   <div class="table-wrap">
-    <table id="table">
-      <thead>
-        <tr>
-          <th data-col="name">Joueur <span class="sort-arrow">↕</span></th>
-          <th data-col="club">Club <span class="sort-arrow">↕</span></th>
-          <th data-col="position">Poste <span class="sort-arrow">↕</span></th>
-          <th data-col="competition_name">Championnat <span class="sort-arrow">↕</span></th>
-          <th data-col="score">Score moy. <span class="sort-arrow">↕</span></th>
-          <th data-col="goals">Buts <span class="sort-arrow">↕</span></th>
-          <th data-col="assists">Passes D. <span class="sort-arrow">↕</span></th>
-          <th data-col="clean_sheet">Clean Sheet <span class="sort-arrow">↕</span></th>
-          <th data-col="saves">Arrêts <span class="sort-arrow">↕</span></th>
-          <th data-col="yellow_cards">Jaunes <span class="sort-arrow">↕</span></th>
-          <th data-col="red_cards">Rouges <span class="sort-arrow">↕</span></th>
-          <th data-col="mins_played">Min. <span class="sort-arrow">↕</span></th>
-        </tr>
-      </thead>
-      <tbody id="tbody"></tbody>
+    <table>
+      <thead id="group-thead"></thead>
+      <tbody id="group-tbody"></tbody>
     </table>
-    <div id="no-data" class="no-data" style="display:none">Aucun joueur trouvé</div>
+    <div id="group-no-data" class="no-data" style="display:none">Aucun joueur trouvé</div>
   </div>
+</div>
 
-  <script>
-    const RAW = {data_json};
-    document.getElementById('last-updated').textContent = 'Mis à jour : ' + RAW.last_updated;
+<!-- PLAYER VIEW -->
+<div id="tab-player" class="tab-content">
+  <div class="search-wrap">
+    <input id="player-search" type="text" placeholder="Rechercher un joueur par nom…"/>
+  </div>
+  <div id="player-count"></div>
+  <div id="player-results"></div>
+</div>
 
-    let players = RAW.players;
-    let activePos = 'all';
-    let activeComp = 'all';
-    let sortCol = 'score';
-    let sortDir = -1;
-    let searchVal = '';
+<script>
+const DATA = {data_json};
+const STAT_LABELS = {stat_labels_js};
+const ALL_STATS = ["score", {', '.join(f'"{f}"' for f in STAT_FIELDS)}];
+const POS_LABELS = {{Goalkeeper:'Gardien',Defender:'Défenseur',Midfielder:'Milieu',Forward:'Attaquant'}};
 
-    const POS_LABELS = {{ Goalkeeper: 'Gardien', Defender: 'Défenseur', Midfielder: 'Milieu', Forward: 'Attaquant' }};
+document.getElementById('last-updated').textContent = 'Mis à jour : ' + DATA.last_updated;
 
-    function scoreClass(s) {{
-      if (s === null || s === undefined) return '';
-      if (s >= 60) return 'high';
-      if (s >= 40) return 'mid';
-      return 'low';
-    }}
+// ── State ──────────────────────────────────────────────────
+let activeTab = 'group';
+let activeRange = 10;
+let activePos = 'all';
+let activeComp = 'all';
+let sortCol = 'score';
+let sortDir = -1;
+let playerSearch = '';
+let playerSortRange = 10;
 
-    function fmt(v) {{
-      return (v === null || v === undefined) ? '—' : v;
-    }}
+// ── Tab switching ─────────────────────────────────────────
+document.querySelectorAll('.tab').forEach(t => {{
+  t.addEventListener('click', () => {{
+    activeTab = t.dataset.tab;
+    document.querySelectorAll('.tab').forEach(x => x.classList.remove('active'));
+    t.classList.add('active');
+    document.querySelectorAll('.tab-content').forEach(x => x.classList.remove('active'));
+    document.getElementById('tab-' + activeTab).classList.add('active');
+    if (activeTab === 'group') renderGroup();
+    else renderPlayer();
+  }});
+}});
 
-    function render() {{
-      let data = players.filter(p => {{
-        if (activePos !== 'all' && p.position !== activePos) return false;
-        if (activeComp !== 'all' && p.competition_slug !== activeComp) return false;
-        if (searchVal) {{
-          const q = searchVal.toLowerCase();
-          if (!p.name.toLowerCase().includes(q) && !p.club.toLowerCase().includes(q)) return false;
-        }}
-        return true;
-      }});
+// ── Helpers ───────────────────────────────────────────────
+function fmt(v) {{ return (v === null || v === undefined) ? '—' : v; }}
 
-      data.sort((a, b) => {{
-        const av = a[sortCol] ?? (typeof a[sortCol] === 'number' ? -Infinity : '');
-        const bv = b[sortCol] ?? (typeof b[sortCol] === 'number' ? -Infinity : '');
-        if (av < bv) return sortDir;
-        if (av > bv) return -sortDir;
-        return 0;
-      }});
+function scoreClass(v) {{
+  if (v === null || v === undefined) return '';
+  if (v >= 60) return 'high'; if (v >= 40) return 'mid'; return 'low';
+}}
 
-      const tbody = document.getElementById('tbody');
-      tbody.innerHTML = '';
+function avg(arr) {{
+  const vals = arr.filter(v => v !== null && v !== undefined);
+  if (!vals.length) return null;
+  return Math.round((vals.reduce((a,b)=>a+b,0)/vals.length)*100)/100;
+}}
 
-      if (data.length === 0) {{
-        document.getElementById('no-data').style.display = '';
-        document.getElementById('count').textContent = '';
-      }} else {{
-        document.getElementById('no-data').style.display = 'none';
-        document.getElementById('count').textContent = data.length + ' joueur' + (data.length > 1 ? 's' : '');
-        data.forEach(p => {{
-          const sc = scoreClass(p.score);
-          tbody.insertAdjacentHTML('beforeend', `
-            <tr>
-              <td>${{p.name}}</td>
-              <td>${{p.club}}</td>
-              <td><span class="badge pos-${{p.position}}">${{POS_LABELS[p.position] || p.position}}</span></td>
-              <td>${{p.competition_name}}</td>
-              <td><span class="score ${{sc}}">${{fmt(p.score)}}</span></td>
-              <td>${{fmt(p.goals)}}</td>
-              <td>${{fmt(p.assists)}}</td>
-              <td>${{fmt(p.clean_sheet)}}</td>
-              <td>${{fmt(p.saves)}}</td>
-              <td>${{fmt(p.yellow_cards)}}</td>
-              <td>${{fmt(p.red_cards)}}</td>
-              <td>${{fmt(p.mins_played)}}</td>
-            </tr>`);
-        }});
-      }}
+// ── Group view ────────────────────────────────────────────
+function filteredPlayers() {{
+  return DATA.players.filter(p => {{
+    if (activePos !== 'all' && p.position !== activePos) return false;
+    if (activeComp !== 'all' && p.comp_slug !== activeComp) return false;
+    return true;
+  }});
+}}
 
-      document.querySelectorAll('th').forEach(th => {{
-        th.classList.toggle('sorted', th.dataset.col === sortCol);
-        if (th.dataset.col === sortCol) {{
-          th.querySelector('.sort-arrow').textContent = sortDir === -1 ? '↓' : '↑';
-        }} else {{
-          th.querySelector('.sort-arrow').textContent = '↕';
-        }}
-      }});
-    }}
+function getStats(p) {{
+  return (p.stats && p.stats[String(activeRange)]) || null;
+}}
 
-    document.querySelectorAll('.pos-btn').forEach(btn => {{
-      btn.addEventListener('click', () => {{
-        document.querySelectorAll('.pos-btn').forEach(b => b.classList.remove('active'));
-        btn.classList.add('active');
-        activePos = btn.dataset.value;
-        render();
-      }});
+function renderGroup() {{
+  const players = filteredPlayers();
+  const label = [
+    activePos !== 'all' ? POS_LABELS[activePos] : 'Tous postes',
+    activeComp !== 'all' ? (DATA.players.find(p=>p.comp_slug===activeComp)||{{}}).comp_name || activeComp : 'Tous championnats',
+    activeRange + ' matchs'
+  ].join(' · ');
+
+  const posLabel = activePos !== 'all' ? POS_LABELS[activePos]+'s' : 'joueurs';
+  const compLabel = activeComp !== 'all' ? (DATA.players.find(p=>p.comp_slug===activeComp)||{{}}).comp_name || activeComp : 'tous championnats confondus';
+  const sampleSentence = `Ce résultat prend en compte ${{players.length}} ${{posLabel}} (${{compLabel}}, ${{activeRange}} derniers matchs)`;
+  document.getElementById('group-count').textContent = sampleSentence;
+
+  // Aggregate
+  const aggStats = {{}};
+  for (const field of ALL_STATS) {{
+    aggStats[field] = avg(players.map(p => {{ const s=getStats(p); return s?s[field]:null; }}));
+  }}
+  document.getElementById('agg-title').textContent = 'Moyennes du groupe';
+  const aggEl = document.getElementById('agg-stats');
+  aggEl.innerHTML = '';
+  for (const field of ALL_STATS) {{
+    if (aggStats[field] === null) continue;
+    const cls = field==='score' ? scoreClass(aggStats[field]) : '';
+    aggEl.insertAdjacentHTML('beforeend',
+      `<div class="agg-stat"><div class="label">${{STAT_LABELS[field]||field}}</div><div class="value ${{cls}}">${{aggStats[field]}}</div></div>`
+    );
+  }}
+
+  // Sort players
+  const sorted = [...players].sort((a,b) => {{
+    const sa = getStats(a), sb = getStats(b);
+    const av = sa?sa[sortCol]:null, bv = sb?sb[sortCol]:null;
+    if (av===null && bv===null) return 0;
+    if (av===null) return 1; if (bv===null) return -1;
+    return av<bv ? sortDir : av>bv ? -sortDir : 0;
+  }});
+
+  // Header
+  const thead = document.getElementById('group-thead');
+  thead.innerHTML = '<tr>' + [
+    ['name','Joueur'], ['club','Club'], ['position','Poste'], ['comp_name','Championnat'],
+    ...ALL_STATS.map(f => [f, STAT_LABELS[f]||f])
+  ].map(([col,lbl]) => {{
+    const isSorted = col === sortCol;
+    return `<th data-col="${{col}}" class="${{isSorted?'sorted':''}}">${{lbl}} <span class="arr">${{isSorted?(sortDir===-1?'↓':'↑'):'↕'}}</span></th>`;
+  }}).join('') + '</tr>';
+
+  thead.querySelectorAll('th').forEach(th => {{
+    th.addEventListener('click', () => {{
+      if (sortCol === th.dataset.col) sortDir *= -1;
+      else {{ sortCol = th.dataset.col; sortDir = -1; }}
+      renderGroup();
     }});
+  }});
 
-    document.querySelectorAll('.comp-btn').forEach(btn => {{
-      btn.addEventListener('click', () => {{
-        document.querySelectorAll('.comp-btn').forEach(b => b.classList.remove('active'));
-        btn.classList.add('active');
-        activeComp = btn.dataset.value;
-        render();
-      }});
+  // Body
+  const tbody = document.getElementById('group-tbody');
+  if (!sorted.length) {{
+    tbody.innerHTML = '';
+    document.getElementById('group-no-data').style.display='';
+    return;
+  }}
+  document.getElementById('group-no-data').style.display='none';
+  tbody.innerHTML = sorted.map(p => {{
+    const s = getStats(p);
+    return `<tr>
+      <td>${{p.name}}</td>
+      <td>${{p.club}}</td>
+      <td><span class="badge pos-${{p.position}}">${{POS_LABELS[p.position]||p.position}}</span></td>
+      <td>${{p.comp_name}}</td>
+      ${{ALL_STATS.map(f => {{
+        const v = s?s[f]:null;
+        const cls = f==='score' ? 'score-val '+scoreClass(v) : '';
+        return `<td><span class="${{cls}}">${{fmt(v)}}</span></td>`;
+      }}).join('')}}
+    </tr>`;
+  }}).join('');
+}}
+
+// ── Player view ───────────────────────────────────────────
+function renderPlayer() {{
+  const q = playerSearch.toLowerCase().trim();
+  const results = document.getElementById('player-results');
+  const countEl = document.getElementById('player-count');
+
+  if (!q) {{
+    countEl.textContent = '';
+    results.innerHTML = '<div class="empty-state">Tapez un nom pour rechercher un joueur</div>';
+    return;
+  }}
+
+  // Deduplicate by slug
+  const seen = new Set();
+  const matched = DATA.players.filter(p => {{
+    if (!p.name.toLowerCase().includes(q)) return false;
+    if (seen.has(p.slug)) return false;
+    seen.add(p.slug);
+    return true;
+  }});
+
+  countEl.textContent = matched.length + ' résultat' + (matched.length>1?'s':'');
+
+  if (!matched.length) {{
+    results.innerHTML = '<div class="empty-state">Aucun joueur trouvé</div>';
+    return;
+  }}
+
+  results.innerHTML = matched.map(p => {{
+    const comps = DATA.players.filter(x=>x.slug===p.slug).map(x=>x.comp_name);
+    const uniqueComps = [...new Set(comps)].join(', ');
+    return `<div class="player-card">
+      <h2>${{p.name}}</h2>
+      <div class="meta">
+        <span class="badge pos-${{p.position}}">${{POS_LABELS[p.position]||p.position}}</span>
+        &nbsp;${{p.club}} &nbsp;·&nbsp; ${{uniqueComps}}
+      </div>
+      <div class="range-tabs" data-slug="${{p.slug}}">
+        ${{[5,10,20].map(n=>`<div class="range-tab ${{n===10?'active':''}}" data-n="${{n}}">${{n}} matchs</div>`).join('')}}
+      </div>
+      <div class="stats-grid" id="sg-${{p.slug}}">
+        ${{renderStatsGrid(p.stats, 10)}}
+      </div>
+    </div>`;
+  }}).join('');
+
+  results.querySelectorAll('.range-tab').forEach(tab => {{
+    tab.addEventListener('click', () => {{
+      const card = tab.closest('.player-card');
+      const slug = card.querySelector('.range-tabs').dataset.slug;
+      const n = parseInt(tab.dataset.n);
+      card.querySelectorAll('.range-tab').forEach(t=>t.classList.remove('active'));
+      tab.classList.add('active');
+      const player = DATA.players.find(p=>p.slug===slug);
+      document.getElementById('sg-'+slug).innerHTML = renderStatsGrid(player.stats, n);
     }});
+  }});
+}}
 
-    document.getElementById('search').addEventListener('input', e => {{
-      searchVal = e.target.value.trim();
-      render();
-    }});
+function renderStatsGrid(stats, n) {{
+  const s = stats && stats[String(n)];
+  if (!s) return '<div style="color:#475569;font-size:.85rem">Pas de données pour cette range</div>';
+  return ALL_STATS.map(f => {{
+    if (s[f]===null||s[f]===undefined) return '';
+    return `<div class="stat-card"><div class="slabel">${{STAT_LABELS[f]||f}}</div><div class="sval">${{s[f]}}</div></div>`;
+  }}).join('');
+}}
 
-    document.querySelectorAll('th[data-col]').forEach(th => {{
-      th.addEventListener('click', () => {{
-        if (sortCol === th.dataset.col) {{ sortDir *= -1; }}
-        else {{ sortCol = th.dataset.col; sortDir = -1; }}
-        render();
-      }});
-    }});
+// ── Event listeners ───────────────────────────────────────
+document.querySelectorAll('.range-btn').forEach(btn => {{
+  btn.addEventListener('click', () => {{
+    document.querySelectorAll('.range-btn').forEach(b=>b.classList.remove('active'));
+    btn.classList.add('active');
+    activeRange = parseInt(btn.dataset.range);
+    renderGroup();
+  }});
+}});
 
-    render();
-  </script>
+document.querySelectorAll('.pos-btn').forEach(btn => {{
+  btn.addEventListener('click', () => {{
+    document.querySelectorAll('.pos-btn').forEach(b=>b.classList.remove('active'));
+    btn.classList.add('active');
+    activePos = btn.dataset.value;
+    renderGroup();
+  }});
+}});
+
+document.querySelectorAll('.comp-btn').forEach(btn => {{
+  btn.addEventListener('click', () => {{
+    document.querySelectorAll('.comp-btn').forEach(b=>b.classList.remove('active'));
+    btn.classList.add('active');
+    activeComp = btn.dataset.value;
+    renderGroup();
+  }});
+}});
+
+document.getElementById('player-search').addEventListener('input', e => {{
+  playerSearch = e.target.value;
+  renderPlayer();
+}});
+
+renderGroup();
+</script>
 </body>
 </html>"""
 
 
 if __name__ == "__main__":
-    players = main()
+    players, competitions = main()
     last_updated = datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
-
-    html = generate_html(players, last_updated)
+    html = generate_html(players, competitions, last_updated)
     with open("index.html", "w", encoding="utf-8") as f:
         f.write(html)
-
-    print(f"Done — {len(players)} players written to index.html")
+    print(f"\nDone — {len(players)} entries, {len(set(p['slug'] for p in players))} unique players → index.html")
