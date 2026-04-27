@@ -75,7 +75,7 @@ COMPETITIONS_FALLBACK = {
 
 DISCOVER_QUERY = """
 {
-  searchPlayers(advancedFilters: "sport:football", pageSize: 500) {
+  searchPlayers(advancedFilters: "sport:football", pageSize: 100) {
     hits {
       player {
         activeClub {
@@ -102,19 +102,19 @@ def gql(query, retries=5):
             r = requests.post(SORARE_API, json={"query": query}, headers=build_headers(), timeout=30)
             if r.status_code == 429:
                 wait = 10 * (attempt + 1)
-                print(f"  429 rate limit — waiting {wait}s...", file=sys.stderr)
+                print(f"  429 rate limit — waiting {wait}s...", file=sys.stderr, flush=True)
                 time.sleep(wait)
                 continue
             r.raise_for_status()
             body = r.json()
             if "errors" in body:
                 msg = body["errors"][0].get("message", "")
-                print(f"  GQL error: {msg}", file=sys.stderr)
+                print(f"  GQL error: {msg}", file=sys.stderr, flush=True)
                 return None
             return body.get("data")
         except Exception as exc:
             if attempt == retries - 1:
-                print(f"  Request failed: {exc}", file=sys.stderr)
+                print(f"  Request failed: {exc}", file=sys.stderr, flush=True)
                 return None
             time.sleep(2 ** attempt)
     return None
@@ -136,9 +136,9 @@ def get_competitions():
                 if slug and is_league(slug):
                     found[slug] = c["displayName"]
         if found:
-            print(f"Discovered {len(found)} competitions")
+            print(f"Discovered {len(found)} competitions", flush=True)
             return found
-    print("Using fallback competitions list", file=sys.stderr)
+    print("Using fallback competitions list", file=sys.stderr, flush=True)
     return COMPETITIONS_FALLBACK
 
 
@@ -232,7 +232,7 @@ def main():
 
     for comp_slug, comp_name in competitions.items():
         for position in POSITIONS:
-            print(f"Listing {position}s — {comp_name}...")
+            print(f"Listing {position}s — {comp_name}...", flush=True)
             players = get_players_for_comp_position(comp_slug, position)
             time.sleep(REQUEST_DELAY)
             for p in players:
@@ -249,11 +249,11 @@ def main():
     # Step 2: Fetch stats for all unique players (one query each)
     all_slugs = list(player_meta.keys())
     total = len(all_slugs)
-    print(f"\nFetching stats for {total} unique players...")
+    print(f"\nFetching stats for {total} unique players...", flush=True)
     player_stats = {}
     for i, slug in enumerate(all_slugs):
         if i % 50 == 0:
-            print(f"  {i}/{total}...")
+            print(f"  {i}/{total}...", flush=True)
         scores = fetch_player_stats(slug)
         player_stats[slug] = compute_averages(scores)
         time.sleep(REQUEST_DELAY)
@@ -668,4 +668,4 @@ if __name__ == "__main__":
     html = generate_html(players, competitions, last_updated)
     with open("index.html", "w", encoding="utf-8") as f:
         f.write(html)
-    print(f"\nDone — {len(players)} entries, {len(set(p['slug'] for p in players))} unique players → index.html")
+    print(f"\nDone — {len(players)} entries, {len(set(p['slug'] for p in players))} unique players → index.html", flush=True)

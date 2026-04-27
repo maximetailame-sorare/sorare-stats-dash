@@ -27,6 +27,7 @@ jobs:
       - name: Fetch data & generate dashboard
         env:
           SORARE_API_KEY: ${{ secrets.SORARE_API_KEY }}
+          PYTHONUNBUFFERED: "1"
         run: python fetch_data.py
 
       - name: Commit & push
