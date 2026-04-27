@@ -9,8 +9,7 @@ from collections import defaultdict
 SORARE_API = "https://api.sorare.com/graphql"
 POSITIONS = ["Goalkeeper", "Defender", "Midfielder", "Forward"]
 RANGES = [5, 10, 20]
-BATCH_SIZE = 10  # players per stats query (stays under complexity limit without API key)
-REQUEST_DELAY = 0.15  # seconds between requests
+REQUEST_DELAY = 1.5  # seconds between requests (avoid 429)
 
 STAT_FIELDS = [
     "goals", "goalAssist", "yellowCard", "redCard", "minsPlayed",
@@ -97,10 +96,15 @@ def build_headers():
     return headers
 
 
-def gql(query, retries=3):
+def gql(query, retries=5):
     for attempt in range(retries):
         try:
             r = requests.post(SORARE_API, json={"query": query}, headers=build_headers(), timeout=30)
+            if r.status_code == 429:
+                wait = 10 * (attempt + 1)
+                print(f"  429 rate limit — waiting {wait}s...", file=sys.stderr)
+                time.sleep(wait)
+                continue
             r.raise_for_status()
             body = r.json()
             if "errors" in body:
@@ -112,7 +116,7 @@ def gql(query, retries=3):
             if attempt == retries - 1:
                 print(f"  Request failed: {exc}", file=sys.stderr)
                 return None
-            time.sleep(1)
+            time.sleep(2 ** attempt)
     return None
 
 
@@ -170,22 +174,25 @@ def get_players_for_comp_position(comp_slug, position):
     ]
 
 
-def fetch_stats_batch(slugs):
-    """Fetch last 20 so5Scores for up to BATCH_SIZE players in one query."""
+def fetch_player_stats(slug):
+    """Fetch so5Scores for one player. Complexity ~200, safely under 500 limit."""
     stats_fields = "\n".join(STAT_FIELDS)
-    aliases = "\n".join(
-        f'p{i}: player(slug: "{slug}") {{ so5Scores(last: 20) {{ score playerGameStats {{ {stats_fields} }} }} }}'
-        for i, slug in enumerate(slugs)
-    )
-    query = f"{{ football {{ {aliases} }} }}"
+    query = f"""
+    {{
+      football {{
+        player(slug: "{slug}") {{
+          so5Scores(last: 20) {{
+            score
+            playerGameStats {{ {stats_fields} }}
+          }}
+        }}
+      }}
+    }}
+    """
     data = gql(query)
     if not data:
-        return {}
-    football = data.get("football") or {}
-    return {
-        slugs[i]: football.get(f"p{i}", {}).get("so5Scores") or []
-        for i in range(len(slugs))
-    }
+        return []
+    return ((data.get("football") or {}).get("player") or {}).get("so5Scores") or []
 
 
 def compute_averages(so5_scores):
@@ -239,16 +246,16 @@ def main():
                 })
                 comp_position_players[(comp_slug, position)].append(slug)
 
-    # Step 2: Fetch stats for all unique players
+    # Step 2: Fetch stats for all unique players (one query each)
     all_slugs = list(player_meta.keys())
-    print(f"\nFetching stats for {len(all_slugs)} unique players...")
+    total = len(all_slugs)
+    print(f"\nFetching stats for {total} unique players...")
     player_stats = {}
-    for i in range(0, len(all_slugs), BATCH_SIZE):
-        batch = all_slugs[i: i + BATCH_SIZE]
-        print(f"  Stats batch {i // BATCH_SIZE + 1}/{(len(all_slugs) + BATCH_SIZE - 1) // BATCH_SIZE}...")
-        stats = fetch_stats_batch(batch)
-        for slug, scores in stats.items():
-            player_stats[slug] = compute_averages(scores)
+    for i, slug in enumerate(all_slugs):
+        if i % 50 == 0:
+            print(f"  {i}/{total}...")
+        scores = fetch_player_stats(slug)
+        player_stats[slug] = compute_averages(scores)
         time.sleep(REQUEST_DELAY)
 
     # Step 3: Build final player list (one entry per player×competition×position)
