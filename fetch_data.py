@@ -4,7 +4,7 @@ import sys
 import requests
 from datetime import datetime
 
-SORARE_API = "https://api.sorare.com/sports/graphql"
+SORARE_API = "https://api.sorare.com/graphql"
 
 POSITIONS = ["Goalkeeper", "Defender", "Midfielder", "Forward"]
 
