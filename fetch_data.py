@@ -46,16 +46,7 @@ STAT_LABELS = {
     "penaltySave": "Penaltys arrêtés",
 }
 
-COMPETITION_EXCLUDE = {
-    "friendl", "trophy", "shield", "copa-", "taca", "trofeo", "coupe-",
-    "coppa-", "-pokal", "play-off", "super-cup", "supercopa", "open-cup",
-    "hybrid", "asia-trophy", "tipsport", "emirates", "emperor-cup",
-    "community", "torneos", "league-cup", "leagues-cup", "j-league-cup",
-    "canadian-championship", "club-world-cup", "libertadores", "3-lig",
-    "efl-trophy", "fa-cup", "concacaf",
-}
-
-COMPETITIONS_FALLBACK = {
+COMPETITIONS = {
     "premier-league-gb-eng": "Premier League",
     "football-league-championship": "EFL Championship",
     "bundesliga-de": "Bundesliga",
@@ -77,19 +68,6 @@ COMPETITIONS_FALLBACK = {
     "uefa-europa-conference-league": "Europa Conference League",
 }
 
-DISCOVER_QUERY = """
-{
-  searchPlayers(advancedFilters: "sport:football", pageSize: 100) {
-    hits {
-      player {
-        activeClub {
-          activeCompetitions { slug displayName }
-        }
-      }
-    }
-  }
-}
-"""
 
 
 def build_headers():
@@ -124,26 +102,6 @@ def gql(query, retries=5):
     return None
 
 
-def is_league(slug):
-    return not any(kw in slug for kw in COMPETITION_EXCLUDE)
-
-
-def get_competitions():
-    data = gql(DISCOVER_QUERY)
-    if data:
-        hits = data.get("searchPlayers", {}).get("hits") or []
-        found = {}
-        for hit in hits:
-            club = (hit.get("player") or {}).get("activeClub") or {}
-            for c in club.get("activeCompetitions") or []:
-                slug = c.get("slug", "")
-                if slug and is_league(slug):
-                    found[slug] = c["displayName"]
-        if found:
-            print(f"Discovered {len(found)} competitions", flush=True)
-            return found
-    print("Using fallback competitions list", file=sys.stderr, flush=True)
-    return COMPETITIONS_FALLBACK
 
 
 def get_players_for_comp_position(comp_slug, position):
@@ -223,7 +181,8 @@ def compute_averages(so5_scores):
 
 
 def main():
-    competitions = get_competitions()
+    competitions = COMPETITIONS
+    print(f"Using {len(competitions)} competitions", flush=True)
 
     # Step 1: Collect all (player, comp, position) entries
     # slug -> { name, club, comps: [{comp_slug, comp_name, position}] }
