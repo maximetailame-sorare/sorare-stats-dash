@@ -448,6 +448,15 @@ def generate_html(players, competitions, last_updated):
         </div>
       </div>
     </div>
+    <div class="filter-group" id="club-filter-group" style="display:none">
+      <span class="filter-label">Club</span>
+      <div class="multi-wrap" id="club-wrap">
+        <div class="multi-trigger" id="club-trigger">Tous</div>
+        <div class="multi-dropdown" id="club-dropdown">
+          <label class="multi-option all-opt"><input type="checkbox" id="club-all" checked> Tous</label>
+        </div>
+      </div>
+    </div>
     <div class="filter-group slider-group">
       <span class="filter-label">Min. jouées</span>
       <input type="range" id="mins-slider" min="0" max="90" value="0" step="5"/>
@@ -500,7 +509,9 @@ let activeTab = 'group';
 let activeRange = 10;
 let selectedPos = new Set();   // empty = tous
 let selectedComp = new Set();  // empty = tous
+let selectedClub = new Set();  // empty = tous
 let minMins = 0;
+const CLUB_FILTER_COMPS = new Set(["premier-league-gb-eng","bundesliga-de","laliga-es","ligue-1-fr"]);
 let aggMode = 'mean';
 let sortCol = 'score';
 let sortDir = -1;
@@ -564,12 +575,73 @@ function filteredPlayers() {{
   return DATA.players.filter(p => {{
     if (selectedPos.size > 0 && !selectedPos.has(p.position)) return false;
     if (selectedComp.size > 0 && !selectedComp.has(p.comp_slug)) return false;
+    if (selectedClub.size > 0 && !selectedClub.has(p.club)) return false;
     if (minMins > 0) {{
       const s = (p.stats && p.stats[String(activeRange)]) || {{}};
       if ((s.MINS_PLAYED || 0) < minMins) return false;
     }}
     return true;
   }});
+}}
+
+function updateClubFilter() {{
+  const activeComps = selectedComp.size > 0 ? [...selectedComp] : [...CLUB_FILTER_COMPS];
+  const relevantComps = activeComps.filter(c => CLUB_FILTER_COMPS.has(c));
+  const group = document.getElementById('club-filter-group');
+
+  if (relevantComps.length === 0) {{
+    group.style.display = 'none';
+    selectedClub.clear();
+    return;
+  }}
+  group.style.display = '';
+
+  const clubs = [...new Set(
+    DATA.players.filter(p => relevantComps.includes(p.comp_slug)).map(p => p.club)
+  )].sort();
+
+  const dropdown = document.getElementById('club-dropdown');
+  dropdown.innerHTML = `<label class="multi-option all-opt"><input type="checkbox" id="club-all" checked> Tous</label>` +
+    clubs.map(c => `<label class="multi-option"><input type="checkbox" value="${{c}}"> ${{c}}</label>`).join('');
+
+  selectedClub.clear();
+  document.getElementById('club-trigger').textContent = 'Tous';
+  document.getElementById('club-trigger').classList.remove('has-selection');
+
+  const allCb = document.getElementById('club-all');
+  const itemCbs = [...dropdown.querySelectorAll('input[type=checkbox]:not(#club-all)')];
+
+  allCb.addEventListener('change', () => {{
+    if (allCb.checked) {{
+      selectedClub.clear();
+      itemCbs.forEach(cb => cb.checked = false);
+      document.getElementById('club-trigger').textContent = 'Tous';
+      document.getElementById('club-trigger').classList.remove('has-selection');
+      renderGroup();
+    }}
+  }});
+
+  itemCbs.forEach(cb => {{
+    cb.addEventListener('change', () => {{
+      if (cb.checked) {{ selectedClub.add(cb.value); allCb.checked = false; }}
+      else {{ selectedClub.delete(cb.value); if (selectedClub.size === 0) allCb.checked = true; }}
+      const trigger = document.getElementById('club-trigger');
+      if (selectedClub.size === 0) {{
+        trigger.textContent = 'Tous'; trigger.classList.remove('has-selection');
+      }} else {{
+        trigger.textContent = selectedClub.size <= 2 ? [...selectedClub].join(', ') : selectedClub.size + ' sélectionnés';
+        trigger.classList.add('has-selection');
+      }}
+      renderGroup();
+    }});
+  }});
+
+  document.getElementById('club-wrap').addEventListener('click', e => e.stopPropagation());
+  document.getElementById('club-trigger').addEventListener('click', e => {{
+    e.stopPropagation();
+    document.getElementById('club-wrap').classList.toggle('open');
+  }});
+  document.addEventListener('click', () => document.getElementById('club-wrap').classList.remove('open'));
 }}
 
 function getStats(p) {{
@@ -817,8 +889,13 @@ function setupCompGroup(groupId) {{
 }}
 
 setupCompGroup('comp-contender');
-
 setupCompGroup('comp-challenger');
+
+// Refresh club filter whenever competition changes
+document.querySelectorAll('#comp-wrap input[type=checkbox]').forEach(cb => {{
+  cb.addEventListener('change', () => updateClubFilter());
+}});
+updateClubFilter();
 
 document.querySelectorAll('.agg-btn').forEach(btn => {{
   btn.addEventListener('click', () => {{
