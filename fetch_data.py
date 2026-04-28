@@ -56,7 +56,7 @@ COMPETITIONS = {
     "segunda-division-es": "La Liga 2",
     "ligue-1-fr": "Ligue 1",
     "ligue-2-fr": "Ligue 2",
-    "serie-a-it": "Serie A",
+    "k-league-1": "K League 1",
     "primera-liga-pt": "Primeira Liga",
     "spor-toto-super-lig": "Süper Lig",
     "premiership-gb-sct": "Scottish Premiership",
