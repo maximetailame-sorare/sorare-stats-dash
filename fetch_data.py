@@ -8,37 +8,43 @@ from datetime import datetime
 SORARE_API = "https://api.sorare.com/graphql"
 POSITIONS = ["Goalkeeper", "Defender", "Midfielder", "Forward"]
 RANGES = [5, 10, 20]
+RANGE_LIMITS = {5: "LAST_5", 10: "LAST_10", 20: "LAST_20"}
 REQUEST_DELAY = 1.5
+INITIAL_BATCH_SIZE = 5  # auto-splits on complexity error
 
-STAT_FIELDS = [
-    "goals", "goalAssist", "yellowCard", "redCard", "minsPlayed",
-    "cleanSheet", "saves", "totalPass", "accuratePass", "totalTackle",
-    "interceptionWon", "wonContest", "duelWon", "lostCorners",
-    "errorLeadToGoal", "ownGoals", "penaltyConceded", "penaltyKickMissed",
-    "penaltySave",
+STAT_TYPES = [
+    "ACCURATE_PASS", "ASSIST_PENALTY_WON", "BIG_CHANCE_CREATED", "CLEARANCE_OFF_LINE",
+    "DUEL_WON", "EFFECTIVE_CLEARANCE", "ERROR_LEAD_TO_GOAL", "FOULS", "GOALS",
+    "INTERCEPTION_WON", "LAST_MAN_TACKLE", "LOST_CORNERS", "ONTARGET_SCORING_ATT",
+    "OWN_GOALS", "PENALTY_CONCEDED", "PENALTY_SAVE", "PENALTY_WON", "RED_CARD",
+    "SAVES", "WAS_FOULED", "WON_CONTEST", "WON_TACKLE", "YELLOW_CARD",
 ]
 
 STAT_LABELS = {
     "score": "Score SO5",
-    "goals": "Buts",
-    "goalAssist": "Passes D.",
-    "yellowCard": "Carton J.",
-    "redCard": "Carton R.",
-    "minsPlayed": "Minutes",
-    "cleanSheet": "Clean Sheet",
-    "saves": "Arrêts",
-    "totalPass": "Passes tot.",
-    "accuratePass": "Passes réussies",
-    "totalTackle": "Tacles",
-    "interceptionWon": "Interceptions",
-    "wonContest": "Duels gagnés",
-    "duelWon": "Duels",
-    "lostCorners": "Corners perdus",
-    "errorLeadToGoal": "Erreurs menant au but",
-    "ownGoals": "CSC",
-    "penaltyConceded": "Penaltys concédés",
-    "penaltyKickMissed": "Penaltys manqués",
-    "penaltySave": "Penaltys arrêtés",
+    "ACCURATE_PASS": "Passes réussies",
+    "ASSIST_PENALTY_WON": "Assist penalty obtenu",
+    "BIG_CHANCE_CREATED": "Grosses occasions créées",
+    "CLEARANCE_OFF_LINE": "Dégagements sur la ligne",
+    "DUEL_WON": "Duels gagnés",
+    "EFFECTIVE_CLEARANCE": "Dégagements efficaces",
+    "ERROR_LEAD_TO_GOAL": "Erreurs menant au but",
+    "FOULS": "Fautes",
+    "GOALS": "Buts",
+    "INTERCEPTION_WON": "Interceptions",
+    "LAST_MAN_TACKLE": "Tacle dernier homme",
+    "LOST_CORNERS": "Corners perdus",
+    "ONTARGET_SCORING_ATT": "Tirs cadrés",
+    "OWN_GOALS": "CSC",
+    "PENALTY_CONCEDED": "Penaltys concédés",
+    "PENALTY_SAVE": "Penaltys arrêtés",
+    "PENALTY_WON": "Penaltys obtenus",
+    "RED_CARD": "Carton rouge",
+    "SAVES": "Arrêts",
+    "WAS_FOULED": "Fautes subies",
+    "WON_CONTEST": "Duels gagnés (SO5)",
+    "WON_TACKLE": "Tacles réussis",
+    "YELLOW_CARD": "Carton jaune",
 }
 
 COMPETITIONS = {
@@ -99,16 +105,37 @@ def gql(query, retries=5):
 
 
 
-RANGE_LIMITS = {5: "LAST_5", 10: "LAST_10", 20: "LAST_20"}
+def _stat_aliases():
+    """Generate all averageStats aliases: r{n}_{TYPE} for each range × stat type."""
+    lines = []
+    for n, limit in RANGE_LIMITS.items():
+        for t in STAT_TYPES:
+            lines.append(f"r{n}_{t}: averageStats(limit: {limit}, type: {t})")
+    # Also fetch the overall SO5 score average
+    for n, limit in RANGE_LIMITS.items():
+        lines.append(f"r{n}_score: averageStats(limit: {limit}, type: WON_CONTEST)")
+    return "\n".join(lines)
 
 
-def fetch_players_with_stats(comp_slug, position):
-    """Fetch players + averageStats for all ranges in one query."""
-    stats_fields = "\n".join(STAT_FIELDS)
-    avg_aliases = "\n".join(
-        f'avg{n}: averageStats(limit: {limit}, type: WON_CONTEST) {{ {stats_fields} }}'
-        for n, limit in RANGE_LIMITS.items()
-    )
+STAT_ALIASES = _stat_aliases()
+
+
+def _parse_player_stats(p):
+    """Extract stats dict {range: {type: value}} from a player GQL response."""
+    stats = {}
+    for n in RANGES:
+        s = {}
+        for t in STAT_TYPES + ["score"]:
+            key = f"r{n}_{t}"
+            v = p.get(key)
+            if v is not None:
+                s[t] = round(float(v), 2)
+        stats[str(n)] = s if s else None
+    return stats
+
+
+def get_player_slugs(comp_slug, position):
+    """Lightweight query — just slugs, name, club."""
     query = f"""
     {{
       searchPlayers(
@@ -120,7 +147,6 @@ def fetch_players_with_stats(comp_slug, position):
             slug
             displayName
             activeClub {{ name }}
-            {avg_aliases}
           }}
         }}
       }}
@@ -130,52 +156,102 @@ def fetch_players_with_stats(comp_slug, position):
     if not data:
         return []
     hits = data.get("searchPlayers", {}).get("hits") or []
-    players = []
-    for h in hits:
-        p = h.get("player") or {}
-        if not p.get("slug"):
-            continue
-        stats = {}
-        for n in RANGE_LIMITS:
-            raw = p.get(f"avg{n}") or {}
-            if raw:
-                stats[str(n)] = {f: round(float(v), 2) for f, v in raw.items() if v is not None}
-            else:
-                stats[str(n)] = None
-        players.append({
-            "slug": p["slug"],
-            "name": p.get("displayName") or p["slug"],
-            "club": (p.get("activeClub") or {}).get("name", ""),
-            "stats": stats,
-        })
-    return players
+    return [
+        {
+            "slug": h["player"]["slug"],
+            "name": h["player"].get("displayName") or h["player"]["slug"],
+            "club": (h["player"].get("activeClub") or {}).get("name", ""),
+        }
+        for h in hits if h.get("player", {}).get("slug")
+    ]
+
+
+def fetch_stats_batch(slugs):
+    """Fetch averageStats for a batch of players. Auto-splits on complexity error."""
+    if not slugs:
+        return {}
+    player_blocks = "\n".join(
+        f'p{i}: player(slug: "{slug}") {{ {STAT_ALIASES} }}'
+        for i, slug in enumerate(slugs)
+    )
+    query = f"{{ football {{ {player_blocks} }} }}"
+
+    for attempt in range(5):
+        try:
+            r = requests.post(SORARE_API, json={"query": query}, headers=build_headers(), timeout=60)
+            if r.status_code == 429:
+                wait = 10 * (attempt + 1)
+                print(f"  429 — waiting {wait}s...", flush=True)
+                time.sleep(wait)
+                continue
+            r.raise_for_status()
+            body = r.json()
+            if "errors" in body:
+                msg = body["errors"][0].get("message", "")
+                if "complexity" in msg.lower() and len(slugs) > 1:
+                    mid = len(slugs) // 2
+                    print(f"  Complexity — splitting {len(slugs)} → {mid}+{len(slugs)-mid}", flush=True)
+                    return {**fetch_stats_batch(slugs[:mid]), **fetch_stats_batch(slugs[mid:])}
+                print(f"  GQL error: {msg}", file=sys.stderr, flush=True)
+                return {}
+            football = (body.get("data") or {}).get("football") or {}
+            return {
+                slugs[i]: _parse_player_stats(football.get(f"p{i}") or {})
+                for i in range(len(slugs))
+            }
+        except Exception as exc:
+            if attempt == 4:
+                print(f"  Batch failed: {exc}", file=sys.stderr, flush=True)
+                return {}
+            time.sleep(2 ** attempt)
+    return {}
 
 
 def main():
     competitions = COMPETITIONS
     print(f"Using {len(competitions)} competitions", flush=True)
 
-    all_players = []
-    seen = {}  # slug -> index in all_players (first occurrence)
-
+    # Step 1: collect all player metadata per (comp, position)
+    player_meta = {}  # slug -> {name, club, comps: [...]}
     for comp_slug, comp_name in competitions.items():
         for position in POSITIONS:
-            print(f"Fetching {position}s — {comp_name}...", flush=True)
-            players = fetch_players_with_stats(comp_slug, position)
+            print(f"Listing {position}s — {comp_name}...", flush=True)
+            for p in get_player_slugs(comp_slug, position):
+                slug = p["slug"]
+                if slug not in player_meta:
+                    player_meta[slug] = {"name": p["name"], "club": p["club"], "comps": []}
+                player_meta[slug]["comps"].append({
+                    "comp_slug": comp_slug, "comp_name": comp_name, "position": position,
+                })
             time.sleep(REQUEST_DELAY)
-            for p in players:
-                entry = {
-                    "slug": p["slug"],
-                    "name": p["name"],
-                    "club": p["club"],
-                    "position": position,
-                    "comp_slug": comp_slug,
-                    "comp_name": comp_name,
-                    "stats": p["stats"],
-                }
-                all_players.append(entry)
 
-    print(f"\nDone — {len(all_players)} entries, {len(set(p['slug'] for p in all_players))} unique players", flush=True)
+    # Step 2: fetch stats for all unique players
+    all_slugs = list(player_meta.keys())
+    total = len(all_slugs)
+    print(f"\nFetching stats for {total} unique players (batch {INITIAL_BATCH_SIZE})...", flush=True)
+    player_stats = {}
+    for i in range(0, total, INITIAL_BATCH_SIZE):
+        batch = all_slugs[i: i + INITIAL_BATCH_SIZE]
+        print(f"  {i}/{total}...", flush=True)
+        player_stats.update(fetch_stats_batch(batch))
+        time.sleep(REQUEST_DELAY)
+
+    # Step 3: build final list (one entry per player × comp × position)
+    all_players = []
+    for slug, meta in player_meta.items():
+        stats = player_stats.get(slug, {})
+        for c in meta["comps"]:
+            all_players.append({
+                "slug": slug,
+                "name": meta["name"],
+                "club": meta["club"],
+                "position": c["position"],
+                "comp_slug": c["comp_slug"],
+                "comp_name": c["comp_name"],
+                "stats": {str(n): stats.get(str(n)) for n in RANGES},
+            })
+
+    print(f"\nDone — {len(all_players)} entries, {total} unique players", flush=True)
     return all_players, competitions
 
 
@@ -191,7 +267,7 @@ def generate_html(players, competitions, last_updated):
         for slug, name in sorted(competitions.items(), key=lambda x: x[1])
     )
 
-    all_stats = ["score"] + STAT_FIELDS
+    all_stats = ["score"] + STAT_TYPES
     stat_labels_js = json.dumps(STAT_LABELS)
 
     return f"""<!DOCTYPE html>
@@ -323,7 +399,7 @@ def generate_html(players, competitions, last_updated):
 <script>
 const DATA = {data_json};
 const STAT_LABELS = {stat_labels_js};
-const ALL_STATS = ["score", {', '.join(f'"{f}"' for f in STAT_FIELDS)}];
+const ALL_STATS = ["score", {', '.join(f'"{f}"' for f in STAT_TYPES)}];
 const POS_LABELS = {{Goalkeeper:'Gardien',Defender:'Défenseur',Midfielder:'Milieu',Forward:'Attaquant'}};
 
 document.getElementById('last-updated').textContent = 'Mis à jour : ' + DATA.last_updated;
