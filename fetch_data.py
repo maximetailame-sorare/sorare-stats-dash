@@ -4,15 +4,10 @@ import sys
 import time
 import requests
 from datetime import datetime
-from collections import defaultdict
 
 SORARE_API = "https://api.sorare.com/graphql"
 POSITIONS = ["Goalkeeper", "Defender", "Midfielder", "Forward"]
 RANGES = [5, 10, 20]
-# With API key: complexity limit is 600 → batch 2 players (~212 each = 424 total)
-# Without API key: complexity limit is 500 → batch 1 player
-BATCH_SIZE_WITH_KEY = 2
-BATCH_SIZE_WITHOUT_KEY = 1
 REQUEST_DELAY = 1.5
 
 STAT_FIELDS = [
@@ -104,7 +99,16 @@ def gql(query, retries=5):
 
 
 
-def get_players_for_comp_position(comp_slug, position):
+RANGE_LIMITS = {5: "LAST_5", 10: "LAST_10", 20: "LAST_20"}
+
+
+def fetch_players_with_stats(comp_slug, position):
+    """Fetch players + averageStats for all ranges in one query."""
+    stats_fields = "\n".join(STAT_FIELDS)
+    avg_aliases = "\n".join(
+        f'avg{n}: averageStats(limit: {limit}, type: WON_CONTEST) {{ {stats_fields} }}'
+        for n, limit in RANGE_LIMITS.items()
+    )
     query = f"""
     {{
       searchPlayers(
@@ -116,6 +120,7 @@ def get_players_for_comp_position(comp_slug, position):
             slug
             displayName
             activeClub {{ name }}
+            {avg_aliases}
           }}
         }}
       }}
@@ -125,143 +130,52 @@ def get_players_for_comp_position(comp_slug, position):
     if not data:
         return []
     hits = data.get("searchPlayers", {}).get("hits") or []
-    return [
-        {
-            "slug": h["player"]["slug"],
-            "name": h["player"].get("displayName") or h["player"]["slug"],
-            "club": (h["player"].get("activeClub") or {}).get("name", ""),
-        }
-        for h in hits
-        if h.get("player", {}).get("slug")
-    ]
-
-
-def fetch_stats_batch(slugs):
-    """Fetch so5Scores for a batch of players. Auto-splits if complexity is exceeded."""
-    if not slugs:
-        return {}
-    stats_fields = "\n".join(STAT_FIELDS)
-    aliases = "\n".join(
-        f'p{i}: player(slug: "{slug}") {{ so5Scores(last: 20) {{ score playerGameStats {{ {stats_fields} }} }} }}'
-        for i, slug in enumerate(slugs)
-    )
-    query = f"{{ football {{ {aliases} }} }}"
-
-    for attempt in range(5):
-        try:
-            r = requests.post(SORARE_API, json={"query": query}, headers=build_headers(), timeout=60)
-            if r.status_code == 429:
-                wait = 10 * (attempt + 1)
-                print(f"  429 — waiting {wait}s...", flush=True)
-                time.sleep(wait)
-                continue
-            r.raise_for_status()
-            body = r.json()
-            if "errors" in body:
-                msg = body["errors"][0].get("message", "")
-                if "complexity" in msg.lower() and len(slugs) > 1:
-                    # Split batch in half and retry each half
-                    mid = len(slugs) // 2
-                    print(f"  Complexity limit hit, splitting batch {len(slugs)} → {mid}+{len(slugs)-mid}", flush=True)
-                    left = fetch_stats_batch(slugs[:mid])
-                    right = fetch_stats_batch(slugs[mid:])
-                    return {**left, **right}
-                print(f"  GQL error: {msg}", file=sys.stderr, flush=True)
-                return {}
-            football = (body.get("data") or {}).get("football") or {}
-            return {
-                slugs[i]: (football.get(f"p{i}") or {}).get("so5Scores") or []
-                for i in range(len(slugs))
-            }
-        except Exception as exc:
-            if attempt == 4:
-                print(f"  Batch failed: {exc}", file=sys.stderr, flush=True)
-                return {}
-            time.sleep(2 ** attempt)
-    return {}
-
-
-def compute_averages(so5_scores):
-    """Returns {5: {...}, 10: {...}, 20: {...}} averages from game stats."""
-    played = [
-        g["playerGameStats"]
-        for g in so5_scores
-        if g.get("playerGameStats") and (g["playerGameStats"].get("minsPlayed") or 0) > 0
-    ]
-    sorare_scores = [g["score"] for g in so5_scores if g.get("score") is not None]
-
-    result = {}
-    for n in RANGES:
-        games = played[:n]
-        scores = sorare_scores[:n]
-        if not games and not scores:
-            result[n] = None
+    players = []
+    for h in hits:
+        p = h.get("player") or {}
+        if not p.get("slug"):
             continue
         stats = {}
-        if scores:
-            stats["score"] = round(sum(scores) / len(scores), 2)
-        for field in STAT_FIELDS:
-            values = [g[field] for g in games if g.get(field) is not None]
-            stats[field] = round(sum(values) / len(values), 2) if values else None
-        result[n] = stats
-    return result
+        for n in RANGE_LIMITS:
+            raw = p.get(f"avg{n}") or {}
+            if raw:
+                stats[str(n)] = {f: round(float(v), 2) for f, v in raw.items() if v is not None}
+            else:
+                stats[str(n)] = None
+        players.append({
+            "slug": p["slug"],
+            "name": p.get("displayName") or p["slug"],
+            "club": (p.get("activeClub") or {}).get("name", ""),
+            "stats": stats,
+        })
+    return players
 
 
 def main():
     competitions = COMPETITIONS
     print(f"Using {len(competitions)} competitions", flush=True)
 
-    # Step 1: Collect all (player, comp, position) entries
-    # slug -> { name, club, comps: [{comp_slug, comp_name, position}] }
-    player_meta = {}
-    # comp_position -> [slug, ...]
-    comp_position_players = defaultdict(list)
+    all_players = []
+    seen = {}  # slug -> index in all_players (first occurrence)
 
     for comp_slug, comp_name in competitions.items():
         for position in POSITIONS:
-            print(f"Listing {position}s — {comp_name}...", flush=True)
-            players = get_players_for_comp_position(comp_slug, position)
+            print(f"Fetching {position}s — {comp_name}...", flush=True)
+            players = fetch_players_with_stats(comp_slug, position)
             time.sleep(REQUEST_DELAY)
             for p in players:
-                slug = p["slug"]
-                if slug not in player_meta:
-                    player_meta[slug] = {"name": p["name"], "club": p["club"], "comps": []}
-                player_meta[slug]["comps"].append({
+                entry = {
+                    "slug": p["slug"],
+                    "name": p["name"],
+                    "club": p["club"],
+                    "position": position,
                     "comp_slug": comp_slug,
                     "comp_name": comp_name,
-                    "position": position,
-                })
-                comp_position_players[(comp_slug, position)].append(slug)
+                    "stats": p["stats"],
+                }
+                all_players.append(entry)
 
-    # Step 2: Fetch stats for all unique players
-    all_slugs = list(player_meta.keys())
-    total = len(all_slugs)
-    batch_size = BATCH_SIZE_WITH_KEY if os.environ.get("SORARE_API_KEY") else BATCH_SIZE_WITHOUT_KEY
-    print(f"\nFetching stats for {total} unique players (batch size: {batch_size})...", flush=True)
-    player_stats = {}
-    for i in range(0, total, batch_size):
-        batch = all_slugs[i: i + batch_size]
-        print(f"  {i}/{total}...", flush=True)
-        results = fetch_stats_batch(batch)
-        for slug, scores in results.items():
-            player_stats[slug] = compute_averages(scores)
-        time.sleep(REQUEST_DELAY)
-
-    # Step 3: Build final player list (one entry per player×competition×position)
-    all_players = []
-    for slug, meta in player_meta.items():
-        avgs = player_stats.get(slug, {})
-        for comp_info in meta["comps"]:
-            all_players.append({
-                "slug": slug,
-                "name": meta["name"],
-                "club": meta["club"],
-                "position": comp_info["position"],
-                "comp_slug": comp_info["comp_slug"],
-                "comp_name": comp_info["comp_name"],
-                "stats": {str(n): avgs.get(n) for n in RANGES},
-            })
-
+    print(f"\nDone — {len(all_players)} entries, {len(set(p['slug'] for p in all_players))} unique players", flush=True)
     return all_players, competitions
 
 
