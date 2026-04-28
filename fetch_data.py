@@ -63,6 +63,7 @@ COMPETITIONS = {
     "spor-toto-super-lig": "Süper Lig",
     "premiership-gb-sct": "Scottish Premiership",
     "austrian-bundesliga": "Austrian Bundesliga",
+    "superliga-dk": "Danish Superliga",
     "superliga-argentina-de-futbol": "Superliga Argentina",
     "mlspa": "Major League Soccer",
     "j1-100-year-vision-league": "J1 League",
@@ -71,6 +72,11 @@ COMPETITIONS = {
     "uefa-europa-conference-league": "Europa Conference League",
     "eredivisie-nl": "Eredivisie",
     "jupiler-pro-league": "Jupiler Pro League",
+}
+
+CHALLENGER_SLUGS = {
+    "primera-liga-pt", "spor-toto-super-lig", "premiership-gb-sct",
+    "austrian-bundesliga", "superliga-dk",
 }
 
 
@@ -273,10 +279,30 @@ def generate_html(players, competitions, last_updated):
         "stat_labels": STAT_LABELS,
     }, ensure_ascii=False)
 
-    comp_checkboxes = "\n".join(
-        f'<label class="multi-option"><input type="checkbox" value="{slug}"> {name}</label>'
-        for slug, name in sorted(competitions.items(), key=lambda x: x[1])
+    challenger_values = " ".join(
+        slug for slug in competitions if slug in CHALLENGER_SLUGS
     )
+    regular = sorted(
+        ((slug, name) for slug, name in competitions.items() if slug not in CHALLENGER_SLUGS),
+        key=lambda x: x[1]
+    )
+    challenger = sorted(
+        ((slug, name) for slug, name in competitions.items() if slug in CHALLENGER_SLUGS),
+        key=lambda x: x[1]
+    )
+    regular_html = "\n".join(
+        f'<label class="multi-option"><input type="checkbox" value="{slug}"> {name}</label>'
+        for slug, name in regular
+    )
+    challenger_items_html = "\n".join(
+        f'<label class="multi-option sub-option"><input type="checkbox" value="{slug}"> {name}</label>'
+        for slug, name in challenger
+    )
+    comp_checkboxes = f"""
+{regular_html}
+<label class="multi-option group-header"><input type="checkbox" id="comp-challenger" data-group="{challenger_values}"> Challenger</label>
+{challenger_items_html}
+"""
 
     all_stats = ["score"] + STAT_TYPES
     stat_labels_js = json.dumps(STAT_LABELS)
@@ -316,6 +342,8 @@ def generate_html(players, competitions, last_updated):
     .multi-option:hover{{background:#334155}}
     .multi-option input[type=checkbox]{{accent-color:#6366f1;cursor:pointer}}
     .multi-option.all-opt{{border-bottom:1px solid #334155;color:#94a3b8;font-weight:600}}
+    .multi-option.group-header{{border-top:1px solid #334155;color:#94a3b8;font-weight:600;margin-top:2px}}
+    .multi-option.sub-option{{padding-left:24px;color:#94a3b8}}
     .slider-group{{display:flex;align-items:center;gap:12px;flex-wrap:wrap}}
     .slider-group input[type=range]{{-webkit-appearance:none;width:200px;height:4px;border-radius:2px;background:#334155;outline:none}}
     .slider-group input[type=range]::-webkit-slider-thumb{{-webkit-appearance:none;width:14px;height:14px;border-radius:50%;background:#6366f1;cursor:pointer}}
@@ -736,6 +764,43 @@ setupMulti('pos-wrap', 'pos-all', 'pos-trigger', selectedPos,
 
 setupMulti('comp-wrap', 'comp-all', 'comp-trigger', selectedComp,
   v => (DATA.players.find(p=>p.comp_slug===v)||{{}}).comp_name || v);
+
+// Challenger group checkbox behaviour
+const challengerCb = document.getElementById('comp-challenger');
+if (challengerCb) {{
+  const groupSlugs = challengerCb.dataset.group.split(' ').filter(Boolean);
+  const subCbs = groupSlugs.map(slug =>
+    document.querySelector(`#comp-wrap input[value="${{slug}}"]`)
+  ).filter(Boolean);
+
+  challengerCb.addEventListener('change', () => {{
+    subCbs.forEach(cb => {{
+      cb.checked = challengerCb.checked;
+      if (challengerCb.checked) selectedComp.add(cb.value);
+      else selectedComp.delete(cb.value);
+    }});
+    if (selectedComp.size === 0) document.getElementById('comp-all').checked = true;
+    else document.getElementById('comp-all').checked = false;
+    // trigger label update via re-running updateTrigger inside setupMulti is not exposed,
+    // so we manually update the trigger
+    const trigger = document.getElementById('comp-trigger');
+    if (selectedComp.size === 0) {{
+      trigger.textContent = 'Tous'; trigger.classList.remove('has-selection');
+    }} else {{
+      const labels = [...selectedComp].map(v=>(DATA.players.find(p=>p.comp_slug===v)||{{}}).comp_name||v);
+      trigger.textContent = labels.length <= 2 ? labels.join(', ') : labels.length + ' sélectionnés';
+      trigger.classList.add('has-selection');
+    }}
+    renderGroup();
+  }});
+
+  subCbs.forEach(cb => {{
+    cb.addEventListener('change', () => {{
+      challengerCb.checked = subCbs.every(c => c.checked);
+      challengerCb.indeterminate = !challengerCb.checked && subCbs.some(c => c.checked);
+    }});
+  }});
+}}
 
 document.querySelectorAll('.agg-btn').forEach(btn => {{
   btn.addEventListener('click', () => {{
