@@ -80,6 +80,11 @@ CHALLENGER_SLUGS = {
     "austrian-bundesliga", "superliga-dk", "serie-a-it",
 }
 
+CONTENDER_SLUGS = {
+    "ligue-2-fr", "2-bundesliga", "segunda-division-es",
+    "superliga-argentina-de-futbol", "football-league-championship",
+}
+
 
 
 def build_headers():
@@ -280,29 +285,35 @@ def generate_html(players, competitions, last_updated):
         "stat_labels": STAT_LABELS,
     }, ensure_ascii=False)
 
-    challenger_values = " ".join(
-        slug for slug in competitions if slug in CHALLENGER_SLUGS
-    )
+    def group_values(slugs):
+        return " ".join(slug for slug in competitions if slug in slugs)
+
+    grouped_slugs = CHALLENGER_SLUGS | CONTENDER_SLUGS
     regular = sorted(
-        ((slug, name) for slug, name in competitions.items() if slug not in CHALLENGER_SLUGS),
+        ((slug, name) for slug, name in competitions.items() if slug not in grouped_slugs),
         key=lambda x: x[1]
     )
     challenger = sorted(
         ((slug, name) for slug, name in competitions.items() if slug in CHALLENGER_SLUGS),
         key=lambda x: x[1]
     )
-    regular_html = "\n".join(
-        f'<label class="multi-option"><input type="checkbox" value="{slug}"> {name}</label>'
-        for slug, name in regular
+    contender = sorted(
+        ((slug, name) for slug, name in competitions.items() if slug in CONTENDER_SLUGS),
+        key=lambda x: x[1]
     )
-    challenger_items_html = "\n".join(
-        f'<label class="multi-option sub-option"><input type="checkbox" value="{slug}"> {name}</label>'
-        for slug, name in challenger
-    )
+
+    def items_html(items, cls=""):
+        return "\n".join(
+            f'<label class="multi-option {cls}"><input type="checkbox" value="{slug}"> {name}</label>'
+            for slug, name in items
+        )
+
     comp_checkboxes = f"""
-{regular_html}
-<label class="multi-option group-header"><input type="checkbox" id="comp-challenger" data-group="{challenger_values}"> Challenger</label>
-{challenger_items_html}
+{items_html(regular)}
+<label class="multi-option group-header"><input type="checkbox" id="comp-contender" data-group="{group_values(CONTENDER_SLUGS)}"> Contender</label>
+{items_html(contender, "sub-option")}
+<label class="multi-option group-header"><input type="checkbox" id="comp-challenger" data-group="{group_values(CHALLENGER_SLUGS)}"> Challenger</label>
+{items_html(challenger, "sub-option")}
 """
 
     all_stats = ["score"] + STAT_TYPES
@@ -766,24 +777,16 @@ setupMulti('pos-wrap', 'pos-all', 'pos-trigger', selectedPos,
 setupMulti('comp-wrap', 'comp-all', 'comp-trigger', selectedComp,
   v => (DATA.players.find(p=>p.comp_slug===v)||{{}}).comp_name || v);
 
-// Challenger group checkbox behaviour
-const challengerCb = document.getElementById('comp-challenger');
-if (challengerCb) {{
-  const groupSlugs = challengerCb.dataset.group.split(' ').filter(Boolean);
+// Group checkbox behaviour (shared)
+function setupCompGroup(groupId) {{
+  const groupCb = document.getElementById(groupId);
+  if (!groupCb) return;
+  const groupSlugs = groupCb.dataset.group.split(' ').filter(Boolean);
   const subCbs = groupSlugs.map(slug =>
     document.querySelector(`#comp-wrap input[value="${{slug}}"]`)
   ).filter(Boolean);
 
-  challengerCb.addEventListener('change', () => {{
-    subCbs.forEach(cb => {{
-      cb.checked = challengerCb.checked;
-      if (challengerCb.checked) selectedComp.add(cb.value);
-      else selectedComp.delete(cb.value);
-    }});
-    if (selectedComp.size === 0) document.getElementById('comp-all').checked = true;
-    else document.getElementById('comp-all').checked = false;
-    // trigger label update via re-running updateTrigger inside setupMulti is not exposed,
-    // so we manually update the trigger
+  function refreshTrigger() {{
     const trigger = document.getElementById('comp-trigger');
     if (selectedComp.size === 0) {{
       trigger.textContent = 'Tous'; trigger.classList.remove('has-selection');
@@ -792,16 +795,30 @@ if (challengerCb) {{
       trigger.textContent = labels.length <= 2 ? labels.join(', ') : labels.length + ' sélectionnés';
       trigger.classList.add('has-selection');
     }}
+  }}
+
+  groupCb.addEventListener('change', () => {{
+    subCbs.forEach(cb => {{
+      cb.checked = groupCb.checked;
+      if (groupCb.checked) selectedComp.add(cb.value);
+      else selectedComp.delete(cb.value);
+    }});
+    document.getElementById('comp-all').checked = selectedComp.size === 0;
+    refreshTrigger();
     renderGroup();
   }});
 
   subCbs.forEach(cb => {{
     cb.addEventListener('change', () => {{
-      challengerCb.checked = subCbs.every(c => c.checked);
-      challengerCb.indeterminate = !challengerCb.checked && subCbs.some(c => c.checked);
+      groupCb.checked = subCbs.every(c => c.checked);
+      groupCb.indeterminate = !groupCb.checked && subCbs.some(c => c.checked);
     }});
   }});
 }}
+
+setupCompGroup('comp-contender');
+
+setupCompGroup('comp-challenger');
 
 document.querySelectorAll('.agg-btn').forEach(btn => {{
   btn.addEventListener('click', () => {{
