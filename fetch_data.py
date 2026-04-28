@@ -74,7 +74,7 @@ def build_headers():
     headers = {"Content-Type": "application/json"}
     api_key = os.environ.get("SORARE_API_KEY")
     if api_key:
-        headers["Authorization"] = f"APIKEY {api_key}"
+        headers["APIKEY"] = api_key
     return headers
 
 
