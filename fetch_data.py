@@ -135,35 +135,42 @@ def _parse_player_stats(p):
 
 
 def get_player_slugs(comp_slug, position):
-    """Lightweight query — just slugs, name, club."""
-    query = f"""
-    {{
-      searchPlayers(
-        advancedFilters: "sport:football AND active_competitions:{comp_slug} AND position:{position}",
-        pageSize: 100
-      ) {{
-        hits {{
-          player {{
-            slug
-            displayName
-            activeClub {{ name }}
+    """Lightweight query — just slugs, name, club. Paginates until exhausted."""
+    results = []
+    page = 0
+    while True:
+        query = f"""
+        {{
+          searchPlayers(
+            advancedFilters: "sport:football AND active_competitions:{comp_slug} AND position:{position}",
+            pageSize: 100,
+            page: {page}
+          ) {{
+            hits {{
+              player {{
+                slug
+                displayName
+                activeClub {{ name }}
+              }}
+            }}
           }}
         }}
-      }}
-    }}
-    """
-    data = gql(query)
-    if not data:
-        return []
-    hits = data.get("searchPlayers", {}).get("hits") or []
-    return [
-        {
-            "slug": h["player"]["slug"],
-            "name": h["player"].get("displayName") or h["player"]["slug"],
-            "club": (h["player"].get("activeClub") or {}).get("name", ""),
-        }
-        for h in hits if h.get("player", {}).get("slug")
-    ]
+        """
+        data = gql(query)
+        hits = (data or {}).get("searchPlayers", {}).get("hits") or []
+        for h in hits:
+            p = h.get("player") or {}
+            if p.get("slug"):
+                results.append({
+                    "slug": p["slug"],
+                    "name": p.get("displayName") or p["slug"],
+                    "club": (p.get("activeClub") or {}).get("name", ""),
+                })
+        if len(hits) < 100:
+            break
+        page += 1
+        time.sleep(REQUEST_DELAY)
+    return results
 
 
 def fetch_stats_batch(slugs):
