@@ -387,12 +387,19 @@ def generate_html(players, competitions, last_updated):
       <input type="range" id="mins-slider" min="0" max="90" value="0" step="5"/>
       <span class="slider-val" id="mins-val">≥ 0 min</span>
     </div>
+    <div class="filter-group">
+      <span class="filter-label">Agrégation</span>
+      <button class="filter-btn agg-btn active" data-agg="mean">Moyenne</button>
+      <button class="filter-btn agg-btn" data-agg="median">Médiane</button>
+      <button class="filter-btn agg-btn" data-agg="top10">Top 10%</button>
+      <button class="filter-btn agg-btn" data-agg="top20">Top 20%</button>
+    </div>
   </div>
 
   <div id="group-count"></div>
 
   <div class="aggregate-box" id="agg-box">
-    <h3 id="agg-title">Moyennes du groupe</h3>
+    <h3 id="agg-title">Moyenne du groupe</h3>
     <div class="agg-stats" id="agg-stats"></div>
   </div>
 
@@ -428,6 +435,7 @@ let activeRange = 10;
 let activePos = 'all';
 let activeComp = 'all';
 let minMins = 0;
+let aggMode = 'mean';
 let sortCol = 'score';
 let sortDir = -1;
 let playerSearch = '';
@@ -459,6 +467,31 @@ function avg(arr) {{
   if (!vals.length) return null;
   return Math.round((vals.reduce((a,b)=>a+b,0)/vals.length)*100)/100;
 }}
+
+function median(arr) {{
+  const vals = arr.filter(v => v !== null && v !== undefined).sort((a,b)=>a-b);
+  if (!vals.length) return null;
+  const m = Math.floor(vals.length/2);
+  const r = vals.length%2 ? vals[m] : (vals[m-1]+vals[m])/2;
+  return Math.round(r*100)/100;
+}}
+
+function topPct(arr, pct) {{
+  const vals = arr.filter(v => v !== null && v !== undefined).sort((a,b)=>b-a);
+  if (!vals.length) return null;
+  const n = Math.max(1, Math.round(vals.length * pct));
+  const top = vals.slice(0, n);
+  return Math.round((top.reduce((a,b)=>a+b,0)/top.length)*100)/100;
+}}
+
+function aggregate(arr) {{
+  if (aggMode === 'median') return median(arr);
+  if (aggMode === 'top10') return topPct(arr, 0.10);
+  if (aggMode === 'top20') return topPct(arr, 0.20);
+  return avg(arr);
+}}
+
+const AGG_LABELS = {{ mean:'Moyenne du groupe', median:'Médiane du groupe', top10:'Top 10% du groupe', top20:'Top 20% du groupe' }};
 
 // ── Group view ────────────────────────────────────────────
 function filteredPlayers() {{
@@ -493,9 +526,9 @@ function renderGroup() {{
   // Aggregate
   const aggStats = {{}};
   for (const field of ALL_STATS) {{
-    aggStats[field] = avg(players.map(p => {{ const s=getStats(p); return s?s[field]:null; }}));
+    aggStats[field] = aggregate(players.map(p => {{ const s=getStats(p); return s?s[field]:null; }}));
   }}
-  document.getElementById('agg-title').textContent = 'Moyennes du groupe';
+  document.getElementById('agg-title').textContent = AGG_LABELS[aggMode];
   const aggEl = document.getElementById('agg-stats');
   aggEl.innerHTML = '';
   for (const field of ALL_STATS) {{
@@ -649,6 +682,15 @@ document.querySelectorAll('.comp-btn').forEach(btn => {{
     document.querySelectorAll('.comp-btn').forEach(b=>b.classList.remove('active'));
     btn.classList.add('active');
     activeComp = btn.dataset.value;
+    renderGroup();
+  }});
+}});
+
+document.querySelectorAll('.agg-btn').forEach(btn => {{
+  btn.addEventListener('click', () => {{
+    document.querySelectorAll('.agg-btn').forEach(b=>b.classList.remove('active'));
+    btn.classList.add('active');
+    aggMode = btn.dataset.agg;
     renderGroup();
   }});
 }});
