@@ -7,8 +7,8 @@ from datetime import datetime
 
 SORARE_API = "https://api.sorare.com/graphql"
 POSITIONS = ["Goalkeeper", "Defender", "Midfielder", "Forward"]
-RANGES = [5, 10, 20]
-RANGE_LIMITS = {5: "LAST_5", 10: "LAST_10", 20: "LAST_20"}
+RANGES = [5, 10, 40]
+RANGE_LIMITS = {5: "LAST_5", 10: "LAST_10", 40: "LAST_40"}
 REQUEST_DELAY = 1.5
 INITIAL_BATCH_SIZE = 5  # auto-splits on complexity error
 
@@ -354,7 +354,7 @@ def generate_html(players, competitions, last_updated):
       <span class="filter-label">Range</span>
       <button class="filter-btn range-btn active" data-range="10">10 matchs</button>
       <button class="filter-btn range-btn" data-range="5">5 matchs</button>
-      <button class="filter-btn range-btn" data-range="20">20 matchs</button>
+      <button class="filter-btn range-btn" data-range="40">40 matchs</button>
     </div>
     <div class="filter-group">
       <span class="filter-label">Poste</span>
@@ -572,7 +572,7 @@ function renderPlayer() {{
         &nbsp;${{p.club}} &nbsp;·&nbsp; ${{uniqueComps}}
       </div>
       <div class="range-tabs" data-slug="${{p.slug}}">
-        ${{[5,10,20].map(n=>`<div class="range-tab ${{n===10?'active':''}}" data-n="${{n}}">${{n}} matchs</div>`).join('')}}
+        ${{[5,10,40].map(n=>`<div class="range-tab ${{n===10?'active':''}}" data-n="${{n}}">${{n}} matchs</div>`).join('')}}
       </div>
       <div class="stats-grid" id="sg-${{p.slug}}">
         ${{renderStatsGrid(p.stats, 10)}}
