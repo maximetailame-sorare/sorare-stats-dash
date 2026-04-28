@@ -2,7 +2,7 @@ name: Update Dashboard
 
 on:
   schedule:
-    - cron: "0 10 * * *"   # tous les jours à 10h00 UTC
+    - cron: "0 9 * * *"    # tous les jours à 9h00 UTC
   workflow_dispatch:         # déclenchement manuel possible
 
 permissions:
