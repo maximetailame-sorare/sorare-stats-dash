@@ -273,8 +273,8 @@ def generate_html(players, competitions, last_updated):
         "stat_labels": STAT_LABELS,
     }, ensure_ascii=False)
 
-    comp_options = "\n".join(
-        f'<option value="{slug}">{name}</option>'
+    comp_checkboxes = "\n".join(
+        f'<label class="multi-option"><input type="checkbox" value="{slug}"> {name}</label>'
         for slug, name in sorted(competitions.items(), key=lambda x: x[1])
     )
 
@@ -306,6 +306,16 @@ def generate_html(players, competitions, last_updated):
     .range-btn{{border-radius:5px}}
     select.filter-select{{background:#1e293b;border:1px solid #334155;color:#e2e8f0;padding:5px 10px;border-radius:5px;font-size:0.82rem;cursor:pointer;outline:none}}
     select.filter-select:focus{{border-color:#6366f1}}
+    .multi-wrap{{position:relative;display:inline-block}}
+    .multi-trigger{{background:#1e293b;border:1px solid #334155;color:#e2e8f0;padding:5px 28px 5px 10px;border-radius:5px;font-size:0.82rem;cursor:pointer;user-select:none;min-width:140px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}}
+    .multi-trigger::after{{content:'▾';position:absolute;right:9px;top:50%;transform:translateY(-50%);color:#64748b;pointer-events:none}}
+    .multi-trigger.has-selection{{border-color:#6366f1;color:#a5b4fc}}
+    .multi-dropdown{{display:none;position:absolute;top:calc(100% + 4px);left:0;background:#1e293b;border:1px solid #334155;border-radius:6px;z-index:100;min-width:200px;max-height:280px;overflow-y:auto;box-shadow:0 8px 24px #0008}}
+    .multi-wrap.open .multi-dropdown{{display:block}}
+    .multi-option{{display:flex;align-items:center;gap:8px;padding:7px 12px;cursor:pointer;font-size:0.82rem;color:#cbd5e1;transition:background .1s}}
+    .multi-option:hover{{background:#334155}}
+    .multi-option input[type=checkbox]{{accent-color:#6366f1;cursor:pointer}}
+    .multi-option.all-opt{{border-bottom:1px solid #334155;color:#94a3b8;font-weight:600}}
     .slider-group{{display:flex;align-items:center;gap:12px;flex-wrap:wrap}}
     .slider-group input[type=range]{{-webkit-appearance:none;width:200px;height:4px;border-radius:2px;background:#334155;outline:none}}
     .slider-group input[type=range]::-webkit-slider-thumb{{-webkit-appearance:none;width:14px;height:14px;border-radius:50%;background:#6366f1;cursor:pointer}}
@@ -377,20 +387,26 @@ def generate_html(players, competitions, last_updated):
     </div>
     <div class="filter-group">
       <span class="filter-label">Poste</span>
-      <select id="pos-select" class="filter-select">
-        <option value="all">Tous</option>
-        <option value="Goalkeeper">Gardien</option>
-        <option value="Defender">Défenseur</option>
-        <option value="Midfielder">Milieu</option>
-        <option value="Forward">Attaquant</option>
-      </select>
+      <div class="multi-wrap" id="pos-wrap">
+        <div class="multi-trigger" id="pos-trigger">Tous</div>
+        <div class="multi-dropdown">
+          <label class="multi-option all-opt"><input type="checkbox" id="pos-all" checked> Tous</label>
+          <label class="multi-option"><input type="checkbox" value="Goalkeeper"> Gardien</label>
+          <label class="multi-option"><input type="checkbox" value="Defender"> Défenseur</label>
+          <label class="multi-option"><input type="checkbox" value="Midfielder"> Milieu</label>
+          <label class="multi-option"><input type="checkbox" value="Forward"> Attaquant</label>
+        </div>
+      </div>
     </div>
     <div class="filter-group">
       <span class="filter-label">Championnat</span>
-      <select id="comp-select" class="filter-select">
-        <option value="all">Tous</option>
-        {comp_options}
-      </select>
+      <div class="multi-wrap" id="comp-wrap">
+        <div class="multi-trigger" id="comp-trigger">Tous</div>
+        <div class="multi-dropdown">
+          <label class="multi-option all-opt"><input type="checkbox" id="comp-all" checked> Tous</label>
+          {comp_checkboxes}
+        </div>
+      </div>
     </div>
     <div class="filter-group slider-group">
       <span class="filter-label">Min. jouées</span>
@@ -442,8 +458,8 @@ document.getElementById('last-updated').textContent = 'Mis à jour : ' + DATA.la
 // ── State ──────────────────────────────────────────────────
 let activeTab = 'group';
 let activeRange = 10;
-let activePos = 'all';
-let activeComp = 'all';
+let selectedPos = new Set();   // empty = tous
+let selectedComp = new Set();  // empty = tous
 let minMins = 0;
 let aggMode = 'mean';
 let sortCol = 'score';
@@ -506,8 +522,8 @@ const AGG_LABELS = {{ mean:'Moyenne du groupe', median:'Médiane du groupe', top
 // ── Group view ────────────────────────────────────────────
 function filteredPlayers() {{
   return DATA.players.filter(p => {{
-    if (activePos !== 'all' && p.position !== activePos) return false;
-    if (activeComp !== 'all' && p.comp_slug !== activeComp) return false;
+    if (selectedPos.size > 0 && !selectedPos.has(p.position)) return false;
+    if (selectedComp.size > 0 && !selectedComp.has(p.comp_slug)) return false;
     if (minMins > 0) {{
       const s = (p.stats && p.stats[String(activeRange)]) || {{}};
       if ((s.MINS_PLAYED || 0) < minMins) return false;
@@ -522,14 +538,9 @@ function getStats(p) {{
 
 function renderGroup() {{
   const players = filteredPlayers();
-  const label = [
-    activePos !== 'all' ? POS_LABELS[activePos] : 'Tous postes',
-    activeComp !== 'all' ? (DATA.players.find(p=>p.comp_slug===activeComp)||{{}}).comp_name || activeComp : 'Tous championnats',
-    activeRange + ' matchs'
-  ].join(' · ');
-
-  const posLabel = activePos !== 'all' ? POS_LABELS[activePos]+'s' : 'joueurs';
-  const compLabel = activeComp !== 'all' ? (DATA.players.find(p=>p.comp_slug===activeComp)||{{}}).comp_name || activeComp : 'tous championnats confondus';
+  const posLabel = selectedPos.size === 0 ? 'joueurs' : [...selectedPos].map(v=>POS_LABELS[v]).join(', ');
+  const compLabel = selectedComp.size === 0 ? 'tous championnats confondus'
+    : [...selectedComp].map(v => (DATA.players.find(p=>p.comp_slug===v)||{{}}).comp_name || v).join(', ');
   const sampleSentence = `Ce résultat prend en compte ${{players.length}} ${{posLabel}} (${{compLabel}}, ${{activeRange}} derniers matchs)`;
   document.getElementById('group-count').textContent = sampleSentence;
 
@@ -674,15 +685,57 @@ document.getElementById('range-select').addEventListener('change', e => {{
   renderGroup();
 }});
 
-document.getElementById('pos-select').addEventListener('change', e => {{
-  activePos = e.target.value;
-  renderGroup();
-}});
+// ── Multi-select helper ───────────────────────────────────
+function setupMulti(wrapId, allCheckId, triggerId, state, labelFn) {{
+  const wrap = document.getElementById(wrapId);
+  const trigger = document.getElementById(triggerId);
+  const allCb = document.getElementById(allCheckId);
+  const itemCbs = [...wrap.querySelectorAll('.multi-dropdown input[type=checkbox]:not(#' + allCheckId + ')')];
 
-document.getElementById('comp-select').addEventListener('change', e => {{
-  activeComp = e.target.value;
-  renderGroup();
-}});
+  function updateTrigger() {{
+    if (state.size === 0) {{
+      trigger.textContent = 'Tous';
+      trigger.classList.remove('has-selection');
+    }} else {{
+      const labels = [...state].map(labelFn);
+      trigger.textContent = labels.length <= 2 ? labels.join(', ') : labels.length + ' sélectionnés';
+      trigger.classList.add('has-selection');
+    }}
+  }}
+
+  trigger.addEventListener('click', e => {{
+    e.stopPropagation();
+    wrap.classList.toggle('open');
+  }});
+
+  allCb.addEventListener('change', () => {{
+    if (allCb.checked) {{
+      state.clear();
+      itemCbs.forEach(cb => cb.checked = false);
+      updateTrigger();
+      renderGroup();
+    }}
+  }});
+
+  itemCbs.forEach(cb => {{
+    cb.addEventListener('change', () => {{
+      if (cb.checked) {{ state.add(cb.value); allCb.checked = false; }}
+      else {{ state.delete(cb.value); if (state.size === 0) allCb.checked = true; }}
+      updateTrigger();
+      renderGroup();
+    }});
+  }});
+
+  document.addEventListener('click', e => {{
+    if (!wrap.contains(e.target)) wrap.classList.remove('open');
+  }});
+}}
+
+setupMulti('pos-wrap', 'pos-all', 'pos-trigger', selectedPos,
+  v => ({{Goalkeeper:'Gardien',Defender:'Défenseur',Midfielder:'Milieu',Forward:'Attaquant'}})[v] || v);
+
+setupMulti('comp-wrap', 'comp-all', 'comp-trigger', selectedComp,
+  v => (DATA.players.find(p=>p.comp_slug===v)||{{}}).comp_name || v);
 
 document.querySelectorAll('.agg-btn').forEach(btn => {{
   btn.addEventListener('click', () => {{
