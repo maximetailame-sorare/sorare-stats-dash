@@ -9,9 +9,9 @@ from collections import defaultdict
 SORARE_API = "https://api.sorare.com/graphql"
 POSITIONS = ["Goalkeeper", "Defender", "Midfielder", "Forward"]
 RANGES = [5, 10, 20]
-# With API key: complexity limit is 30 000 → batch 100 players (~200 each)
+# With API key: complexity limit is 600 → batch 2 players (~212 each = 424 total)
 # Without API key: complexity limit is 500 → batch 1 player
-BATCH_SIZE_WITH_KEY = 100
+BATCH_SIZE_WITH_KEY = 2
 BATCH_SIZE_WITHOUT_KEY = 1
 REQUEST_DELAY = 1.5
 
