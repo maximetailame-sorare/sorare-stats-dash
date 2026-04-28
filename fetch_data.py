@@ -72,11 +72,12 @@ COMPETITIONS = {
     "uefa-europa-conference-league": "Europa Conference League",
     "eredivisie-nl": "Eredivisie",
     "jupiler-pro-league": "Jupiler Pro League",
+    "serie-a-it": "Serie A",
 }
 
 CHALLENGER_SLUGS = {
     "primera-liga-pt", "spor-toto-super-lig", "premiership-gb-sct",
-    "austrian-bundesliga", "superliga-dk",
+    "austrian-bundesliga", "superliga-dk", "serie-a-it",
 }
 
 
