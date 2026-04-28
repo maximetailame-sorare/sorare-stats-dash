@@ -273,8 +273,8 @@ def generate_html(players, competitions, last_updated):
         "stat_labels": STAT_LABELS,
     }, ensure_ascii=False)
 
-    comp_buttons = "\n".join(
-        f'<button class="filter-btn comp-btn" data-value="{slug}">{name}</button>'
+    comp_options = "\n".join(
+        f'<option value="{slug}">{name}</option>'
         for slug, name in sorted(competitions.items(), key=lambda x: x[1])
     )
 
@@ -304,6 +304,8 @@ def generate_html(players, competitions, last_updated):
     .filter-btn:hover{{border-color:#6366f1;color:#a5b4fc}}
     .filter-btn.active{{background:#6366f1;border-color:#6366f1;color:#fff;font-weight:600}}
     .range-btn{{border-radius:5px}}
+    select.filter-select{{background:#1e293b;border:1px solid #334155;color:#e2e8f0;padding:5px 10px;border-radius:5px;font-size:0.82rem;cursor:pointer;outline:none}}
+    select.filter-select:focus{{border-color:#6366f1}}
     .slider-group{{display:flex;align-items:center;gap:12px;flex-wrap:wrap}}
     .slider-group input[type=range]{{-webkit-appearance:none;width:200px;height:4px;border-radius:2px;background:#334155;outline:none}}
     .slider-group input[type=range]::-webkit-slider-thumb{{-webkit-appearance:none;width:14px;height:14px;border-radius:50%;background:#6366f1;cursor:pointer}}
@@ -367,22 +369,28 @@ def generate_html(players, competitions, last_updated):
   <div class="controls">
     <div class="filter-group">
       <span class="filter-label">Range</span>
-      <button class="filter-btn range-btn active" data-range="10">10 matchs</button>
-      <button class="filter-btn range-btn" data-range="5">5 matchs</button>
-      <button class="filter-btn range-btn" data-range="40">40 matchs</button>
+      <select id="range-select" class="filter-select">
+        <option value="10">10 matchs</option>
+        <option value="5">5 matchs</option>
+        <option value="40">40 matchs</option>
+      </select>
     </div>
     <div class="filter-group">
       <span class="filter-label">Poste</span>
-      <button class="filter-btn pos-btn active" data-value="all">Tous</button>
-      <button class="filter-btn pos-btn" data-value="Goalkeeper">Gardien</button>
-      <button class="filter-btn pos-btn" data-value="Defender">Défenseur</button>
-      <button class="filter-btn pos-btn" data-value="Midfielder">Milieu</button>
-      <button class="filter-btn pos-btn" data-value="Forward">Attaquant</button>
+      <select id="pos-select" class="filter-select">
+        <option value="all">Tous</option>
+        <option value="Goalkeeper">Gardien</option>
+        <option value="Defender">Défenseur</option>
+        <option value="Midfielder">Milieu</option>
+        <option value="Forward">Attaquant</option>
+      </select>
     </div>
     <div class="filter-group">
       <span class="filter-label">Championnat</span>
-      <button class="filter-btn comp-btn active" data-value="all">Tous</button>
-      {comp_buttons}
+      <select id="comp-select" class="filter-select">
+        <option value="all">Tous</option>
+        {comp_options}
+      </select>
     </div>
     <div class="filter-group slider-group">
       <span class="filter-label">Min. jouées</span>
@@ -661,31 +669,19 @@ function renderStatsGrid(stats, n) {{
 }}
 
 // ── Event listeners ───────────────────────────────────────
-document.querySelectorAll('.range-btn').forEach(btn => {{
-  btn.addEventListener('click', () => {{
-    document.querySelectorAll('.range-btn').forEach(b=>b.classList.remove('active'));
-    btn.classList.add('active');
-    activeRange = parseInt(btn.dataset.range);
-    renderGroup();
-  }});
+document.getElementById('range-select').addEventListener('change', e => {{
+  activeRange = parseInt(e.target.value);
+  renderGroup();
 }});
 
-document.querySelectorAll('.pos-btn').forEach(btn => {{
-  btn.addEventListener('click', () => {{
-    document.querySelectorAll('.pos-btn').forEach(b=>b.classList.remove('active'));
-    btn.classList.add('active');
-    activePos = btn.dataset.value;
-    renderGroup();
-  }});
+document.getElementById('pos-select').addEventListener('change', e => {{
+  activePos = e.target.value;
+  renderGroup();
 }});
 
-document.querySelectorAll('.comp-btn').forEach(btn => {{
-  btn.addEventListener('click', () => {{
-    document.querySelectorAll('.comp-btn').forEach(b=>b.classList.remove('active'));
-    btn.classList.add('active');
-    activeComp = btn.dataset.value;
-    renderGroup();
-  }});
+document.getElementById('comp-select').addEventListener('change', e => {{
+  activeComp = e.target.value;
+  renderGroup();
 }});
 
 document.querySelectorAll('.agg-btn').forEach(btn => {{
