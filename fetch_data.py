@@ -153,7 +153,7 @@ def _parse_player_stats(p):
 def get_player_slugs(comp_slug, position):
     """Lightweight query — just slugs, name, club. Paginates until exhausted."""
     results = []
-    page = 0
+    page = 1
     while True:
         query = f"""
         {{
