@@ -44,7 +44,7 @@ STAT_LABELS = {
     "RED_CARD": "Carton rouge",
     "SAVES": "Arrêts",
     "WAS_FOULED": "Fautes subies",
-    "WON_CONTEST": "Duels gagnés (SO5)",
+    "WON_CONTEST": "Dribbles",
     "WON_TACKLE": "Tacles réussis",
     "YELLOW_CARD": "Carton jaune",
 }
