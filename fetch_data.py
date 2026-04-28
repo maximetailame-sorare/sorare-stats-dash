@@ -15,9 +15,10 @@ INITIAL_BATCH_SIZE = 5  # auto-splits on complexity error
 STAT_TYPES = [
     "ACCURATE_PASS", "ASSIST_PENALTY_WON", "BIG_CHANCE_CREATED", "CLEARANCE_OFF_LINE",
     "DUEL_WON", "EFFECTIVE_CLEARANCE", "ERROR_LEAD_TO_GOAL", "FOULS", "GOALS",
-    "INTERCEPTION_WON", "LAST_MAN_TACKLE", "LOST_CORNERS", "ONTARGET_SCORING_ATT",
-    "OWN_GOALS", "PENALTY_CONCEDED", "PENALTY_SAVE", "PENALTY_WON", "RED_CARD",
-    "SAVES", "WAS_FOULED", "WON_CONTEST", "WON_TACKLE", "YELLOW_CARD",
+    "INTERCEPTION_WON", "LAST_MAN_TACKLE", "LOST_CORNERS", "MINS_PLAYED",
+    "ONTARGET_SCORING_ATT", "OWN_GOALS", "PENALTY_CONCEDED", "PENALTY_SAVE",
+    "PENALTY_WON", "RED_CARD", "SAVES", "WAS_FOULED", "WON_CONTEST", "WON_TACKLE",
+    "YELLOW_CARD",
 ]
 
 STAT_LABELS = {
@@ -34,6 +35,7 @@ STAT_LABELS = {
     "INTERCEPTION_WON": "Interceptions",
     "LAST_MAN_TACKLE": "Tacle dernier homme",
     "LOST_CORNERS": "Corners perdus",
+    "MINS_PLAYED": "Minutes jouées",
     "ONTARGET_SCORING_ATT": "Tirs cadrés",
     "OWN_GOALS": "CSC",
     "PENALTY_CONCEDED": "Penaltys concédés",
@@ -300,6 +302,10 @@ def generate_html(players, competitions, last_updated):
     .filter-btn:hover{{border-color:#6366f1;color:#a5b4fc}}
     .filter-btn.active{{background:#6366f1;border-color:#6366f1;color:#fff;font-weight:600}}
     .range-btn{{border-radius:5px}}
+    .slider-group{{display:flex;align-items:center;gap:12px;flex-wrap:wrap}}
+    .slider-group input[type=range]{{-webkit-appearance:none;width:200px;height:4px;border-radius:2px;background:#334155;outline:none}}
+    .slider-group input[type=range]::-webkit-slider-thumb{{-webkit-appearance:none;width:14px;height:14px;border-radius:50%;background:#6366f1;cursor:pointer}}
+    .slider-val{{font-size:0.82rem;color:#e2e8f0;min-width:90px}}
     .search-wrap{{padding:16px 28px 0}}
     #player-search{{background:#1e293b;border:1px solid #334155;color:#e2e8f0;padding:8px 14px;border-radius:6px;font-size:0.9rem;width:320px}}
     #player-search:focus{{outline:none;border-color:#6366f1}}
@@ -376,6 +382,11 @@ def generate_html(players, competitions, last_updated):
       <button class="filter-btn comp-btn active" data-value="all">Tous</button>
       {comp_buttons}
     </div>
+    <div class="filter-group slider-group">
+      <span class="filter-label">Min. jouées</span>
+      <input type="range" id="mins-slider" min="0" max="90" value="0" step="5"/>
+      <span class="slider-val" id="mins-val">≥ 0 min</span>
+    </div>
   </div>
 
   <div id="group-count"></div>
@@ -416,6 +427,7 @@ let activeTab = 'group';
 let activeRange = 10;
 let activePos = 'all';
 let activeComp = 'all';
+let minMins = 0;
 let sortCol = 'score';
 let sortDir = -1;
 let playerSearch = '';
@@ -453,6 +465,10 @@ function filteredPlayers() {{
   return DATA.players.filter(p => {{
     if (activePos !== 'all' && p.position !== activePos) return false;
     if (activeComp !== 'all' && p.comp_slug !== activeComp) return false;
+    if (minMins > 0) {{
+      const s = (p.stats && p.stats[String(activeRange)]) || {{}};
+      if ((s.MINS_PLAYED || 0) < minMins) return false;
+    }}
     return true;
   }});
 }}
@@ -635,6 +651,12 @@ document.querySelectorAll('.comp-btn').forEach(btn => {{
     activeComp = btn.dataset.value;
     renderGroup();
   }});
+}});
+
+document.getElementById('mins-slider').addEventListener('input', e => {{
+  minMins = parseInt(e.target.value);
+  document.getElementById('mins-val').textContent = '≥ ' + minMins + ' min';
+  renderGroup();
 }});
 
 document.getElementById('player-search').addEventListener('input', e => {{
