@@ -69,6 +69,8 @@ COMPETITIONS = {
     "uefa-champions-league": "Champions League",
     "uefa-europa-league": "Europa League",
     "uefa-europa-conference-league": "Europa Conference League",
+    "eredivisie-nl": "Eredivisie",
+    "jupiler-pro-league": "Jupiler Pro League",
 }
 
 
