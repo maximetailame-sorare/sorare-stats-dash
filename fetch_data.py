@@ -584,14 +584,22 @@ function filteredPlayers() {{
   }});
 }}
 
+// Club dropdown — trigger & close listeners attached once
+const clubWrap = document.getElementById('club-wrap');
+const clubTrigger = document.getElementById('club-trigger');
+clubTrigger.addEventListener('click', e => {{ e.stopPropagation(); clubWrap.classList.toggle('open'); }});
+document.addEventListener('click', e => {{ if (!clubWrap.contains(e.target)) clubWrap.classList.remove('open'); }});
+
 function updateClubFilter() {{
-  const activeComps = selectedComp.size > 0 ? [...selectedComp] : [...CLUB_FILTER_COMPS];
-  const relevantComps = activeComps.filter(c => CLUB_FILTER_COMPS.has(c));
+  const relevantComps = (selectedComp.size > 0 ? [...selectedComp] : [...CLUB_FILTER_COMPS])
+    .filter(c => CLUB_FILTER_COMPS.has(c));
   const group = document.getElementById('club-filter-group');
 
   if (relevantComps.length === 0) {{
     group.style.display = 'none';
     selectedClub.clear();
+    clubTrigger.textContent = 'Tous';
+    clubTrigger.classList.remove('has-selection');
     return;
   }}
   group.style.display = '';
@@ -601,47 +609,41 @@ function updateClubFilter() {{
   )].sort();
 
   const dropdown = document.getElementById('club-dropdown');
-  dropdown.innerHTML = `<label class="multi-option all-opt"><input type="checkbox" id="club-all" checked> Tous</label>` +
+  dropdown.innerHTML =
+    `<label class="multi-option all-opt"><input type="checkbox" id="club-all" checked> Tous</label>` +
     clubs.map(c => `<label class="multi-option"><input type="checkbox" value="${{c}}"> ${{c}}</label>`).join('');
 
   selectedClub.clear();
-  document.getElementById('club-trigger').textContent = 'Tous';
-  document.getElementById('club-trigger').classList.remove('has-selection');
+  clubTrigger.textContent = 'Tous';
+  clubTrigger.classList.remove('has-selection');
+
+  function refreshClubTrigger() {{
+    if (selectedClub.size === 0) {{
+      clubTrigger.textContent = 'Tous'; clubTrigger.classList.remove('has-selection');
+    }} else {{
+      clubTrigger.textContent = selectedClub.size <= 2 ? [...selectedClub].join(', ') : selectedClub.size + ' sélectionnés';
+      clubTrigger.classList.add('has-selection');
+    }}
+  }}
 
   const allCb = document.getElementById('club-all');
-  const itemCbs = [...dropdown.querySelectorAll('input[type=checkbox]:not(#club-all)')];
-
   allCb.addEventListener('change', () => {{
     if (allCb.checked) {{
       selectedClub.clear();
-      itemCbs.forEach(cb => cb.checked = false);
-      document.getElementById('club-trigger').textContent = 'Tous';
-      document.getElementById('club-trigger').classList.remove('has-selection');
+      dropdown.querySelectorAll('input[type=checkbox]:not(#club-all)').forEach(cb => cb.checked = false);
+      refreshClubTrigger();
       renderGroup();
     }}
   }});
 
-  itemCbs.forEach(cb => {{
+  dropdown.querySelectorAll('input[type=checkbox]:not(#club-all)').forEach(cb => {{
     cb.addEventListener('change', () => {{
       if (cb.checked) {{ selectedClub.add(cb.value); allCb.checked = false; }}
       else {{ selectedClub.delete(cb.value); if (selectedClub.size === 0) allCb.checked = true; }}
-      const trigger = document.getElementById('club-trigger');
-      if (selectedClub.size === 0) {{
-        trigger.textContent = 'Tous'; trigger.classList.remove('has-selection');
-      }} else {{
-        trigger.textContent = selectedClub.size <= 2 ? [...selectedClub].join(', ') : selectedClub.size + ' sélectionnés';
-        trigger.classList.add('has-selection');
-      }}
+      refreshClubTrigger();
       renderGroup();
     }});
   }});
-
-  document.getElementById('club-wrap').addEventListener('click', e => e.stopPropagation());
-  document.getElementById('club-trigger').addEventListener('click', e => {{
-    e.stopPropagation();
-    document.getElementById('club-wrap').classList.toggle('open');
-  }});
-  document.addEventListener('click', () => document.getElementById('club-wrap').classList.remove('open'));
 }}
 
 function getStats(p) {{
