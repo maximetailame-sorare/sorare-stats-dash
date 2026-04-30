@@ -127,9 +127,6 @@ def _stat_aliases():
     for n, limit in RANGE_LIMITS.items():
         for t in STAT_TYPES:
             lines.append(f"r{n}_{t}: averageStats(limit: {limit}, type: {t})")
-    # Also fetch the overall SO5 score average
-    for n, limit in RANGE_LIMITS.items():
-        lines.append(f"r{n}_score: averageStats(limit: {limit}, type: WON_CONTEST)")
     return "\n".join(lines)
 
 
@@ -230,6 +227,57 @@ def fetch_stats_batch(slugs):
     return {}
 
 
+def fetch_scores_batch(slugs):
+    """Fetch so5Scores(last:40) for a batch of players. Returns {slug: [score, ...]}."""
+    if not slugs:
+        return {}
+    player_blocks = "\n".join(
+        f'p{i}: player(slug: "{slug}") {{ so5Scores(last: 40) {{ score }} }}'
+        for i, slug in enumerate(slugs)
+    )
+    query = f"{{ football {{ {player_blocks} }} }}"
+
+    for attempt in range(5):
+        try:
+            r = requests.post(SORARE_API, json={"query": query}, headers=build_headers(), timeout=60)
+            if r.status_code == 429:
+                wait = 10 * (attempt + 1)
+                print(f"  429 — waiting {wait}s...", flush=True)
+                time.sleep(wait)
+                continue
+            r.raise_for_status()
+            body = r.json()
+            if "errors" in body:
+                msg = body["errors"][0].get("message", "")
+                if "complexity" in msg.lower() and len(slugs) > 1:
+                    mid = len(slugs) // 2
+                    print(f"  Complexity (scores) — splitting {len(slugs)} → {mid}+{len(slugs)-mid}", flush=True)
+                    return {**fetch_scores_batch(slugs[:mid]), **fetch_scores_batch(slugs[mid:])}
+                print(f"  GQL error (scores): {msg}", file=sys.stderr, flush=True)
+                return {}
+            football = (body.get("data") or {}).get("football") or {}
+            result = {}
+            for i, slug in enumerate(slugs):
+                raw = football.get(f"p{i}") or {}
+                scores = [s["score"] for s in (raw.get("so5Scores") or []) if s.get("score") is not None]
+                result[slug] = scores
+            return result
+        except Exception as exc:
+            if attempt == 4:
+                print(f"  Scores batch failed: {exc}", file=sys.stderr, flush=True)
+                return {}
+            time.sleep(2 ** attempt)
+    return {}
+
+
+def _avg_scores(scores, n):
+    """Average of last n scores from a list (oldest→newest)."""
+    subset = scores[-n:] if len(scores) >= n else scores
+    if not subset:
+        return None
+    return round(sum(subset) / len(subset), 2)
+
+
 def main():
     competitions = COMPETITIONS
     print(f"Using {len(competitions)} competitions", flush=True)
@@ -248,21 +296,40 @@ def main():
                 })
             time.sleep(REQUEST_DELAY)
 
-    # Step 2: fetch stats for all unique players
     all_slugs = list(player_meta.keys())
     total = len(all_slugs)
-    print(f"\nFetching stats for {total} unique players (batch {INITIAL_BATCH_SIZE})...", flush=True)
+
+    # Step 2: fetch averageStats for all unique players
+    print(f"\nFetching averageStats for {total} unique players...", flush=True)
     player_stats = {}
     for i in range(0, total, INITIAL_BATCH_SIZE):
         batch = all_slugs[i: i + INITIAL_BATCH_SIZE]
-        print(f"  {i}/{total}...", flush=True)
+        print(f"  stats {i}/{total}...", flush=True)
         player_stats.update(fetch_stats_batch(batch))
         time.sleep(REQUEST_DELAY)
 
-    # Step 3: build final list (one entry per player × comp × position)
+    # Step 3: fetch SO5 scores for all unique players
+    print(f"\nFetching SO5 scores for {total} unique players...", flush=True)
+    player_scores = {}
+    for i in range(0, total, INITIAL_BATCH_SIZE):
+        batch = all_slugs[i: i + INITIAL_BATCH_SIZE]
+        print(f"  scores {i}/{total}...", flush=True)
+        player_scores.update(fetch_scores_batch(batch))
+        time.sleep(REQUEST_DELAY)
+
+    # Step 4: build final list (one entry per player × comp × position)
     all_players = []
     for slug, meta in player_meta.items():
         stats = player_stats.get(slug, {})
+        scores = player_scores.get(slug, [])
+        # Merge SO5 score into each range's stats dict
+        for n in RANGES:
+            s = stats.get(str(n)) or {}
+            sc = _avg_scores(scores, n)
+            if sc is not None:
+                s["score"] = sc
+            if s:
+                stats[str(n)] = s
         for c in meta["comps"]:
             all_players.append({
                 "slug": slug,
