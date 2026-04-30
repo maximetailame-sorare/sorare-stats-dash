@@ -163,6 +163,7 @@ def get_player_slugs(comp_slug, position):
               player {{
                 slug
                 displayName
+                age
                 activeClub {{ name }}
               }}
             }}
@@ -178,6 +179,7 @@ def get_player_slugs(comp_slug, position):
                     "slug": p["slug"],
                     "name": p.get("displayName") or p["slug"],
                     "club": (p.get("activeClub") or {}).get("name", ""),
+                    "age": p.get("age"),
                 })
         if len(hits) < 100:
             break
@@ -290,7 +292,7 @@ def main():
             for p in get_player_slugs(comp_slug, position):
                 slug = p["slug"]
                 if slug not in player_meta:
-                    player_meta[slug] = {"name": p["name"], "club": p["club"], "comps": []}
+                    player_meta[slug] = {"name": p["name"], "club": p["club"], "age": p.get("age"), "comps": []}
                 player_meta[slug]["comps"].append({
                     "comp_slug": comp_slug, "comp_name": comp_name, "position": position,
                 })
@@ -335,6 +337,7 @@ def main():
                 "slug": slug,
                 "name": meta["name"],
                 "club": meta["club"],
+                "age": meta.get("age"),
                 "position": c["position"],
                 "comp_slug": c["comp_slug"],
                 "comp_name": c["comp_name"],
@@ -741,10 +744,19 @@ function renderGroup() {{
     );
   }}
 
+  const DIRECT_COLS = new Set(['name','club','position','comp_name','age','l10_score']);
+
+  function getSortVal(p, col) {{
+    if (col === 'age') return p.age ?? null;
+    if (col === 'l10_score') return (p.stats && p.stats['10'] && p.stats['10'].score) ?? null;
+    if (DIRECT_COLS.has(col)) return p[col] ?? null;
+    const s = getStats(p);
+    return s ? (s[col] ?? null) : null;
+  }}
+
   // Sort players
   const sorted = [...players].sort((a,b) => {{
-    const sa = getStats(a), sb = getStats(b);
-    const av = sa?sa[sortCol]:null, bv = sb?sb[sortCol]:null;
+    const av = getSortVal(a, sortCol), bv = getSortVal(b, sortCol);
     if (av===null && bv===null) return 0;
     if (av===null) return 1; if (bv===null) return -1;
     return av<bv ? sortDir : av>bv ? -sortDir : 0;
@@ -754,6 +766,7 @@ function renderGroup() {{
   const thead = document.getElementById('group-thead');
   thead.innerHTML = '<tr>' + [
     ['name','Joueur'], ['club','Club'], ['position','Poste'], ['comp_name','Championnat'],
+    ['age','Âge'], ['l10_score','Score L10'],
     ...ALL_STATS.map(f => [f, STAT_LABELS[f]||f])
   ].map(([col,lbl]) => {{
     const isSorted = col === sortCol;
@@ -778,11 +791,14 @@ function renderGroup() {{
   document.getElementById('group-no-data').style.display='none';
   tbody.innerHTML = sorted.map(p => {{
     const s = getStats(p);
+    const l10 = (p.stats && p.stats['10'] && p.stats['10'].score) ?? null;
     return `<tr>
       <td>${{p.name}}</td>
       <td>${{p.club}}</td>
       <td><span class="badge pos-${{p.position}}">${{POS_LABELS[p.position]||p.position}}</span></td>
       <td>${{p.comp_name}}</td>
+      <td>${{fmt(p.age)}}</td>
+      <td><span class="score-val ${{scoreClass(l10)}}">${{fmt(l10)}}</span></td>
       ${{ALL_STATS.map(f => {{
         const v = s?s[f]:null;
         const cls = f==='score' ? 'score-val '+scoreClass(v) : '';
