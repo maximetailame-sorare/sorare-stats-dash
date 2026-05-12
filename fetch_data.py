@@ -188,15 +188,21 @@ def get_player_slugs(comp_slug, position):
     return results
 
 
-def fetch_stats_batch(slugs):
-    """Fetch averageStats for a batch of players. Auto-splits on complexity error."""
+def fetch_batch(slugs):
+    """Fetch averageStats + so5Scores for a batch using players(slugs:[...]).
+    Returns {slug: {"stats": {...}, "scores": [...]}}."""
     if not slugs:
         return {}
-    player_blocks = "\n".join(
-        f'p{i}: player(slug: "{slug}") {{ {STAT_ALIASES} }}'
-        for i, slug in enumerate(slugs)
-    )
-    query = f"{{ football {{ {player_blocks} }} }}"
+    slugs_gql = ", ".join(f'"{s}"' for s in slugs)
+    query = f"""{{
+      football {{
+        players(slugs: [{slugs_gql}]) {{
+          slug
+          {STAT_ALIASES}
+          so5Scores(last: 40) {{ score }}
+        }}
+      }}
+    }}"""
 
     for attempt in range(5):
         try:
@@ -213,60 +219,24 @@ def fetch_stats_batch(slugs):
                 if "complexity" in msg.lower() and len(slugs) > 1:
                     mid = len(slugs) // 2
                     print(f"  Complexity — splitting {len(slugs)} → {mid}+{len(slugs)-mid}", flush=True)
-                    return {**fetch_stats_batch(slugs[:mid]), **fetch_stats_batch(slugs[mid:])}
+                    return {**fetch_batch(slugs[:mid]), **fetch_batch(slugs[mid:])}
                 print(f"  GQL error: {msg}", file=sys.stderr, flush=True)
                 return {}
-            football = (body.get("data") or {}).get("football") or {}
-            return {
-                slugs[i]: _parse_player_stats(football.get(f"p{i}") or {})
-                for i in range(len(slugs))
-            }
-        except Exception as exc:
-            if attempt == 4:
-                print(f"  Batch failed: {exc}", file=sys.stderr, flush=True)
-                return {}
-            time.sleep(2 ** attempt)
-    return {}
-
-
-def fetch_scores_batch(slugs):
-    """Fetch so5Scores(last:40) for a batch of players. Returns {slug: [score, ...]}."""
-    if not slugs:
-        return {}
-    player_blocks = "\n".join(
-        f'p{i}: player(slug: "{slug}") {{ so5Scores(last: 40) {{ score }} }}'
-        for i, slug in enumerate(slugs)
-    )
-    query = f"{{ football {{ {player_blocks} }} }}"
-
-    for attempt in range(5):
-        try:
-            r = requests.post(SORARE_API, json={"query": query}, headers=build_headers(), timeout=60)
-            if r.status_code == 429:
-                wait = 10 * (attempt + 1)
-                print(f"  429 — waiting {wait}s...", flush=True)
-                time.sleep(wait)
-                continue
-            r.raise_for_status()
-            body = r.json()
-            if "errors" in body:
-                msg = body["errors"][0].get("message", "")
-                if "complexity" in msg.lower() and len(slugs) > 1:
-                    mid = len(slugs) // 2
-                    print(f"  Complexity (scores) — splitting {len(slugs)} → {mid}+{len(slugs)-mid}", flush=True)
-                    return {**fetch_scores_batch(slugs[:mid]), **fetch_scores_batch(slugs[mid:])}
-                print(f"  GQL error (scores): {msg}", file=sys.stderr, flush=True)
-                return {}
-            football = (body.get("data") or {}).get("football") or {}
+            players = (body.get("data") or {}).get("football", {}).get("players") or []
             result = {}
-            for i, slug in enumerate(slugs):
-                raw = football.get(f"p{i}") or {}
-                scores = [s["score"] for s in (raw.get("so5Scores") or []) if s.get("score") is not None]
-                result[slug] = scores
+            for p in players:
+                slug = p.get("slug")
+                if not slug:
+                    continue
+                scores = [s["score"] for s in (p.get("so5Scores") or []) if s.get("score") is not None]
+                result[slug] = {
+                    "stats": _parse_player_stats(p),
+                    "scores": scores,
+                }
             return result
         except Exception as exc:
             if attempt == 4:
-                print(f"  Scores batch failed: {exc}", file=sys.stderr, flush=True)
+                print(f"  Batch failed: {exc}", file=sys.stderr, flush=True)
                 return {}
             time.sleep(2 ** attempt)
     return {}
@@ -301,29 +271,21 @@ def main():
     all_slugs = list(player_meta.keys())
     total = len(all_slugs)
 
-    # Step 2: fetch averageStats for all unique players
-    print(f"\nFetching averageStats for {total} unique players...", flush=True)
-    player_stats = {}
+    # Step 2: fetch averageStats + so5Scores for all unique players in one pass
+    print(f"\nFetching stats for {total} unique players...", flush=True)
+    player_data = {}
     for i in range(0, total, INITIAL_BATCH_SIZE):
         batch = all_slugs[i: i + INITIAL_BATCH_SIZE]
-        print(f"  stats {i}/{total}...", flush=True)
-        player_stats.update(fetch_stats_batch(batch))
+        print(f"  {i}/{total}...", flush=True)
+        player_data.update(fetch_batch(batch))
         time.sleep(REQUEST_DELAY)
 
-    # Step 3: fetch SO5 scores for all unique players
-    print(f"\nFetching SO5 scores for {total} unique players...", flush=True)
-    player_scores = {}
-    for i in range(0, total, INITIAL_BATCH_SIZE):
-        batch = all_slugs[i: i + INITIAL_BATCH_SIZE]
-        print(f"  scores {i}/{total}...", flush=True)
-        player_scores.update(fetch_scores_batch(batch))
-        time.sleep(REQUEST_DELAY)
-
-    # Step 4: build final list (one entry per player × comp × position)
+    # Step 3: build final list (one entry per player × comp × position)
     all_players = []
     for slug, meta in player_meta.items():
-        stats = player_stats.get(slug, {})
-        scores = player_scores.get(slug, [])
+        raw = player_data.get(slug, {})
+        stats = raw.get("stats", {})
+        scores = raw.get("scores", [])
         # Merge SO5 score into each range's stats dict
         for n in RANGES:
             s = stats.get(str(n)) or {}
