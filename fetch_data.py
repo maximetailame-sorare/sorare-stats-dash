@@ -9,6 +9,14 @@ SORARE_API = "https://api.sorare.com/graphql"
 POSITIONS = ["Goalkeeper", "Defender", "Midfielder", "Forward"]
 RANGES = [5, 10, 40]
 RANGE_LIMITS = {5: "LAST_5", 10: "LAST_10", 40: "LAST_40"}
+
+# Direct averageScore enum values matching Sorare's L5/L10/L40 display
+SCORE_TYPES = {
+    5:  "LAST_FIVE_SO5_AVERAGE_SCORE",
+    10: "LAST_TEN_PLAYED_SO5_AVERAGE_SCORE",
+    40: "LAST_FORTY_SO5_AVERAGE_SCORE",
+}
+
 REQUEST_DELAY = 1.5
 INITIAL_BATCH_SIZE = 5  # auto-splits on complexity error
 
@@ -135,11 +143,13 @@ def discover_avg_score_enum():
 
 
 def _stat_aliases():
-    """Generate all averageStats aliases: r{n}_{TYPE} for each range × stat type."""
+    """Generate all averageStats + averageScore aliases for the GQL query."""
     lines = []
     for n, limit in RANGE_LIMITS.items():
         for t in STAT_TYPES:
             lines.append(f"r{n}_{t}: averageStats(limit: {limit}, type: {t})")
+    for n, score_type in SCORE_TYPES.items():
+        lines.append(f"score{n}: averageScore(type: {score_type})")
     return "\n".join(lines)
 
 
@@ -151,11 +161,15 @@ def _parse_player_stats(p):
     stats = {}
     for n in RANGES:
         s = {}
-        for t in STAT_TYPES + ["score"]:
+        for t in STAT_TYPES:
             key = f"r{n}_{t}"
             v = p.get(key)
             if v is not None:
                 s[t] = round(float(v), 2)
+        # Sorare's official L5/L10/L40 score via averageScore(type: ...)
+        sc = p.get(f"score{n}")
+        if sc is not None:
+            s["score"] = round(float(sc), 2)
         stats[str(n)] = s if s else None
     return stats
 
@@ -202,8 +216,8 @@ def get_player_slugs(comp_slug, position):
 
 
 def fetch_batch(slugs):
-    """Fetch averageStats + so5Scores for a batch using players(slugs:[...]).
-    Returns {slug: {"stats": {...}, "scores": [...]}}."""
+    """Fetch averageStats + averageScore (L5/L10/L40) for a batch.
+    Returns {slug: {"stats": {...}}}."""
     if not slugs:
         return {}
     slugs_gql = ", ".join(f'"{s}"' for s in slugs)
@@ -212,7 +226,6 @@ def fetch_batch(slugs):
         players(slugs: [{slugs_gql}]) {{
           slug
           {STAT_ALIASES}
-          so5Scores(last: 40) {{ score }}
         }}
       }}
     }}"""
@@ -241,11 +254,7 @@ def fetch_batch(slugs):
                 slug = p.get("slug")
                 if not slug:
                     continue
-                scores = [s["score"] for s in (p.get("so5Scores") or []) if s.get("score") is not None]
-                result[slug] = {
-                    "stats": _parse_player_stats(p),
-                    "scores": scores,
-                }
+                result[slug] = {"stats": _parse_player_stats(p)}
             return result
         except Exception as exc:
             if attempt == 4:
@@ -253,15 +262,6 @@ def fetch_batch(slugs):
                 return {}
             time.sleep(2 ** attempt)
     return {}
-
-
-def _avg_scores(scores, n):
-    """Average of last n non-zero scores (0.0 = did not play, excluded like Sorare does)."""
-    played = [s for s in scores if s > 0]
-    subset = played[-n:] if len(played) >= n else played
-    if not subset:
-        return None
-    return round(sum(subset) / len(subset), 2)
 
 
 def main():
@@ -288,7 +288,7 @@ def main():
     all_slugs = list(player_meta.keys())
     total = len(all_slugs)
 
-    # Step 2: fetch averageStats + so5Scores for all unique players in one pass
+    # Step 2: fetch averageStats + averageScore (L5/L10/L40) for all unique players
     print(f"\nFetching stats for {total} unique players...", flush=True)
     player_data = {}
     for i in range(0, total, INITIAL_BATCH_SIZE):
@@ -300,17 +300,7 @@ def main():
     # Step 3: build final list (one entry per player × comp × position)
     all_players = []
     for slug, meta in player_meta.items():
-        raw = player_data.get(slug, {})
-        stats = raw.get("stats", {})
-        scores = raw.get("scores", [])
-        # Merge SO5 score into each range's stats dict
-        for n in RANGES:
-            s = stats.get(str(n)) or {}
-            sc = _avg_scores(scores, n)
-            if sc is not None:
-                s["score"] = sc
-            if s:
-                stats[str(n)] = s
+        stats = player_data.get(slug, {}).get("stats", {})
         for c in meta["comps"]:
             all_players.append({
                 "slug": slug,
