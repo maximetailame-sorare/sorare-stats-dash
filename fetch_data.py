@@ -121,6 +121,19 @@ def gql(query, retries=5):
 
 
 
+def discover_avg_score_enum():
+    """Try to discover valid AveragePlayerScore enum values via __type introspection."""
+    query = '{ __type(name: "AveragePlayerScore") { enumValues { name } } }'
+    data = gql(query)
+    if data and data.get("__type"):
+        values = [e["name"] for e in (data["__type"].get("enumValues") or []) if e.get("name")]
+        if values:
+            print(f"AveragePlayerScore enum values: {values}", flush=True)
+            return values
+    print("AveragePlayerScore introspection failed or blocked — using so5Scores fallback", flush=True)
+    return []
+
+
 def _stat_aliases():
     """Generate all averageStats aliases: r{n}_{TYPE} for each range × stat type."""
     lines = []
@@ -254,6 +267,9 @@ def _avg_scores(scores, n):
 def main():
     competitions = COMPETITIONS
     print(f"Using {len(competitions)} competitions", flush=True)
+
+    # Discover averageScore enum values (diagnostic + future use)
+    discover_avg_score_enum()
 
     # Step 1: collect all player metadata per (comp, position)
     player_meta = {}  # slug -> {name, club, comps: [...]}
@@ -490,7 +506,9 @@ def generate_html(players, competitions, last_updated):
         <div class="multi-trigger" id="club-trigger">Tous</div>
         <div class="multi-dropdown" id="club-dropdown">
           <div class="club-search-wrap"><input type="text" id="club-search-input" placeholder="Rechercher un club…" autocomplete="off"/></div>
-          <label class="multi-option all-opt"><input type="checkbox" id="club-all" checked> Tous</label>
+          <div id="club-checkbox-list">
+            <label class="multi-option all-opt"><input type="checkbox" id="club-all" checked> Tous</label>
+          </div>
         </div>
       </div>
     </div>
@@ -626,6 +644,16 @@ const clubTrigger = document.getElementById('club-trigger');
 clubTrigger.addEventListener('click', e => {{ e.stopPropagation(); clubWrap.classList.toggle('open'); }});
 document.addEventListener('click', e => {{ if (!clubWrap.contains(e.target)) clubWrap.classList.remove('open'); }});
 
+// Club search — set up once, filters visible labels inside the checkbox list
+const clubSearchInput = document.getElementById('club-search-input');
+clubSearchInput.addEventListener('click', e => e.stopPropagation());
+clubSearchInput.addEventListener('input', () => {{
+  const q = clubSearchInput.value.toLowerCase();
+  document.querySelectorAll('#club-checkbox-list .multi-option:not(.all-opt)').forEach(lbl => {{
+    lbl.style.display = lbl.textContent.toLowerCase().includes(q) ? '' : 'none';
+  }});
+}});
+
 function refreshClubTrigger() {{
   if (selectedClub.size === 0) {{
     clubTrigger.textContent = 'Tous'; clubTrigger.classList.remove('has-selection');
@@ -642,11 +670,11 @@ function updateClubFilter() {{
     DATA.players.filter(p => !comps || comps.includes(p.comp_slug)).map(p => p.club)
   )].sort();
 
-  const dropdown = document.getElementById('club-dropdown');
-  // Preserve current selection
+  // Preserve current selection — only rebuild the checkbox list, not the whole dropdown
   const prevSelected = new Set(selectedClub);
+  const checkboxList = document.getElementById('club-checkbox-list');
 
-  dropdown.innerHTML =
+  checkboxList.innerHTML =
     `<label class="multi-option all-opt"><input type="checkbox" id="club-all"> Tous</label>` +
     clubs.map(c => `<label class="multi-option"><input type="checkbox" value="${{c}}"${{prevSelected.has(c) ? ' checked' : ''}}> ${{c}}</label>`).join('');
 
@@ -661,13 +689,13 @@ function updateClubFilter() {{
   allCb.addEventListener('change', () => {{
     if (allCb.checked) {{
       selectedClub.clear();
-      dropdown.querySelectorAll('input[type=checkbox]:not(#club-all)').forEach(cb => cb.checked = false);
+      checkboxList.querySelectorAll('input[type=checkbox]:not(#club-all)').forEach(cb => cb.checked = false);
       refreshClubTrigger();
       renderGroup();
     }}
   }});
 
-  dropdown.querySelectorAll('input[type=checkbox]:not(#club-all)').forEach(cb => {{
+  checkboxList.querySelectorAll('input[type=checkbox]:not(#club-all)').forEach(cb => {{
     cb.addEventListener('change', () => {{
       if (cb.checked) {{ selectedClub.add(cb.value); allCb.checked = false; }}
       else {{ selectedClub.delete(cb.value); if (selectedClub.size === 0) allCb.checked = true; }}
@@ -675,19 +703,6 @@ function updateClubFilter() {{
       renderGroup();
     }});
   }});
-
-  // Search inside dropdown
-  const searchInput = document.getElementById('club-search-input');
-  if (searchInput) {{
-    searchInput.value = '';
-    searchInput.addEventListener('input', () => {{
-      const q = searchInput.value.toLowerCase();
-      dropdown.querySelectorAll('.multi-option:not(.all-opt)').forEach(lbl => {{
-        lbl.style.display = lbl.textContent.toLowerCase().includes(q) ? '' : 'none';
-      }});
-    }});
-    searchInput.addEventListener('click', e => e.stopPropagation());
-  }}
 }}
 
 function getStats(p) {{
