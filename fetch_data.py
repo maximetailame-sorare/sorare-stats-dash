@@ -389,6 +389,9 @@ def generate_html(players, competitions, last_updated):
     .multi-option.all-opt{{border-bottom:1px solid #334155;color:#94a3b8;font-weight:600}}
     .multi-option.group-header{{border-top:1px solid #334155;color:#94a3b8;font-weight:600;margin-top:2px}}
     .multi-option.sub-option{{padding-left:24px;color:#94a3b8}}
+    .club-search-wrap{{padding:6px 8px;border-bottom:1px solid #334155}}
+    #club-search-input{{width:100%;background:#0f172a;border:1px solid #334155;color:#e2e8f0;padding:5px 8px;border-radius:4px;font-size:0.8rem;outline:none}}
+    #club-search-input:focus{{border-color:#6366f1}}
     .slider-group{{display:flex;align-items:center;gap:12px;flex-wrap:wrap}}
     .slider-group input[type=range]{{-webkit-appearance:none;width:200px;height:4px;border-radius:2px;background:#334155;outline:none}}
     .slider-group input[type=range]::-webkit-slider-thumb{{-webkit-appearance:none;width:14px;height:14px;border-radius:50%;background:#6366f1;cursor:pointer}}
@@ -486,6 +489,7 @@ def generate_html(players, competitions, last_updated):
       <div class="multi-wrap" id="club-wrap">
         <div class="multi-trigger" id="club-trigger">Tous</div>
         <div class="multi-dropdown" id="club-dropdown">
+          <div class="club-search-wrap"><input type="text" id="club-search-input" placeholder="Rechercher un club…" autocomplete="off"/></div>
           <label class="multi-option all-opt"><input type="checkbox" id="club-all" checked> Tous</label>
         </div>
       </div>
@@ -677,6 +681,21 @@ function updateClubFilter() {{
       renderGroup();
     }});
   }});
+
+  // Search inside dropdown
+  const searchInput = document.getElementById('club-search-input');
+  if (searchInput) {{
+    searchInput.value = '';
+    searchInput.addEventListener('input', () => {{
+      const q = searchInput.value.toLowerCase();
+      dropdown.querySelectorAll('.multi-option:not(.all-opt)').forEach(lbl => {{
+        const text = lbl.textContent.toLowerCase();
+        lbl.style.display = text.includes(q) ? '' : 'none';
+      }});
+    }});
+    // Prevent dropdown from closing when clicking inside search
+    searchInput.addEventListener('click', e => e.stopPropagation());
+  }}
 }}
 
 function getStats(p) {{
