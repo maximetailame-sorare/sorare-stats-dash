@@ -243,8 +243,9 @@ def fetch_batch(slugs):
 
 
 def _avg_scores(scores, n):
-    """Average of last n scores from a list (oldest→newest)."""
-    subset = scores[-n:] if len(scores) >= n else scores
+    """Average of last n non-zero scores (0.0 = did not play, excluded like Sorare does)."""
+    played = [s for s in scores if s > 0]
+    subset = played[-n:] if len(played) >= n else played
     if not subset:
         return None
     return round(sum(subset) / len(subset), 2)
