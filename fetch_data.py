@@ -484,7 +484,7 @@ def generate_html(players, competitions, last_updated):
         </div>
       </div>
     </div>
-    <div class="filter-group" id="club-filter-group" style="display:none">
+    <div class="filter-group" id="club-filter-group">
       <span class="filter-label">Club</span>
       <div class="multi-wrap" id="club-wrap">
         <div class="multi-trigger" id="club-trigger">Tous</div>
@@ -548,7 +548,6 @@ let selectedPos = new Set();   // empty = tous
 let selectedComp = new Set();  // empty = tous
 let selectedClub = new Set();  // empty = tous
 let minMins = 0;
-const CLUB_FILTER_COMPS = new Set(["premier-league-gb-eng","bundesliga-de","laliga-es","ligue-1-fr"]);
 let aggMode = 'mean';
 let sortCol = 'score';
 let sortDir = -1;
@@ -627,43 +626,38 @@ const clubTrigger = document.getElementById('club-trigger');
 clubTrigger.addEventListener('click', e => {{ e.stopPropagation(); clubWrap.classList.toggle('open'); }});
 document.addEventListener('click', e => {{ if (!clubWrap.contains(e.target)) clubWrap.classList.remove('open'); }});
 
-function updateClubFilter() {{
-  const relevantComps = (selectedComp.size > 0 ? [...selectedComp] : [...CLUB_FILTER_COMPS])
-    .filter(c => CLUB_FILTER_COMPS.has(c));
-  const group = document.getElementById('club-filter-group');
-
-  if (relevantComps.length === 0) {{
-    group.style.display = 'none';
-    selectedClub.clear();
-    clubTrigger.textContent = 'Tous';
-    clubTrigger.classList.remove('has-selection');
-    return;
+function refreshClubTrigger() {{
+  if (selectedClub.size === 0) {{
+    clubTrigger.textContent = 'Tous'; clubTrigger.classList.remove('has-selection');
+  }} else {{
+    clubTrigger.textContent = selectedClub.size <= 2 ? [...selectedClub].join(', ') : selectedClub.size + ' sélectionnés';
+    clubTrigger.classList.add('has-selection');
   }}
-  group.style.display = '';
+}}
 
+function updateClubFilter() {{
+  // Show clubs from selected competitions, or all competitions if none selected
+  const comps = selectedComp.size > 0 ? [...selectedComp] : null;
   const clubs = [...new Set(
-    DATA.players.filter(p => relevantComps.includes(p.comp_slug)).map(p => p.club)
+    DATA.players.filter(p => !comps || comps.includes(p.comp_slug)).map(p => p.club)
   )].sort();
 
   const dropdown = document.getElementById('club-dropdown');
+  // Preserve current selection
+  const prevSelected = new Set(selectedClub);
+
   dropdown.innerHTML =
-    `<label class="multi-option all-opt"><input type="checkbox" id="club-all" checked> Tous</label>` +
-    clubs.map(c => `<label class="multi-option"><input type="checkbox" value="${{c}}"> ${{c}}</label>`).join('');
+    `<label class="multi-option all-opt"><input type="checkbox" id="club-all"> Tous</label>` +
+    clubs.map(c => `<label class="multi-option"><input type="checkbox" value="${{c}}"${{prevSelected.has(c) ? ' checked' : ''}}> ${{c}}</label>`).join('');
 
+  // Update selectedClub to only keep clubs still in the list
   selectedClub.clear();
-  clubTrigger.textContent = 'Tous';
-  clubTrigger.classList.remove('has-selection');
-
-  function refreshClubTrigger() {{
-    if (selectedClub.size === 0) {{
-      clubTrigger.textContent = 'Tous'; clubTrigger.classList.remove('has-selection');
-    }} else {{
-      clubTrigger.textContent = selectedClub.size <= 2 ? [...selectedClub].join(', ') : selectedClub.size + ' sélectionnés';
-      clubTrigger.classList.add('has-selection');
-    }}
-  }}
+  prevSelected.forEach(c => {{ if (clubs.includes(c)) selectedClub.add(c); }});
 
   const allCb = document.getElementById('club-all');
+  allCb.checked = selectedClub.size === 0;
+  refreshClubTrigger();
+
   allCb.addEventListener('change', () => {{
     if (allCb.checked) {{
       selectedClub.clear();
@@ -689,11 +683,9 @@ function updateClubFilter() {{
     searchInput.addEventListener('input', () => {{
       const q = searchInput.value.toLowerCase();
       dropdown.querySelectorAll('.multi-option:not(.all-opt)').forEach(lbl => {{
-        const text = lbl.textContent.toLowerCase();
-        lbl.style.display = text.includes(q) ? '' : 'none';
+        lbl.style.display = lbl.textContent.toLowerCase().includes(q) ? '' : 'none';
       }});
     }});
-    // Prevent dropdown from closing when clicking inside search
     searchInput.addEventListener('click', e => e.stopPropagation());
   }}
 }}
