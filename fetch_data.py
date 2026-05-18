@@ -442,6 +442,11 @@ def generate_html(players, competitions, last_updated):
     .stat-card .slabel{{font-size:0.68rem;color:#64748b;text-transform:uppercase;letter-spacing:.04em}}
     .stat-card .sval{{font-size:1.15rem;font-weight:700;color:#e2e8f0;margin-top:3px}}
     .empty-state{{text-align:center;padding:60px 28px;color:#475569}}
+    #pagination{{display:flex;align-items:center;justify-content:center;gap:12px;padding:16px 0 8px}}
+    .pag-btn{{background:#1e293b;border:1px solid #334155;color:#94a3b8;padding:6px 16px;border-radius:5px;cursor:pointer;font-size:0.82rem;transition:all .15s}}
+    .pag-btn:hover:not([disabled]){{border-color:#6366f1;color:#a5b4fc}}
+    .pag-btn[disabled]{{opacity:.35;cursor:default}}
+    .pag-info{{font-size:0.82rem;color:#64748b}}
   </style>
 </head>
 <body>
@@ -529,6 +534,7 @@ def generate_html(players, competitions, last_updated):
       <tbody id="group-tbody"></tbody>
     </table>
     <div id="group-no-data" class="no-data" style="display:none">Aucun joueur trouvé</div>
+    <div id="pagination"></div>
   </div>
 </div>
 
@@ -561,6 +567,8 @@ let sortCol = 'score';
 let sortDir = -1;
 let playerSearch = '';
 let playerSortRange = 10;
+let currentPage = 1;
+const PAGE_SIZE = 100;
 
 // ── Tab switching ─────────────────────────────────────────
 document.querySelectorAll('.tab').forEach(t => {{
@@ -681,7 +689,7 @@ function updateClubFilter() {{
       selectedClub.clear();
       checkboxList.querySelectorAll('input[type=checkbox]:not(#club-all)').forEach(cb => cb.checked = false);
       refreshClubTrigger();
-      renderGroup();
+      resetAndRender();
     }}
   }});
 
@@ -690,7 +698,7 @@ function updateClubFilter() {{
       if (cb.checked) {{ selectedClub.add(cb.value); allCb.checked = false; }}
       else {{ selectedClub.delete(cb.value); if (selectedClub.size === 0) allCb.checked = true; }}
       refreshClubTrigger();
-      renderGroup();
+      resetAndRender();
     }});
   }});
 }}
@@ -760,15 +768,22 @@ function renderGroup() {{
     }});
   }});
 
-  // Body
+  // Body — paginated
   const tbody = document.getElementById('group-tbody');
   if (!sorted.length) {{
     tbody.innerHTML = '';
     document.getElementById('group-no-data').style.display='';
+    document.getElementById('pagination').innerHTML = '';
     return;
   }}
   document.getElementById('group-no-data').style.display='none';
-  tbody.innerHTML = sorted.map(p => {{
+
+  const totalPages = Math.ceil(sorted.length / PAGE_SIZE);
+  if (currentPage > totalPages) currentPage = totalPages;
+  const pageStart = (currentPage - 1) * PAGE_SIZE;
+  const pageRows  = sorted.slice(pageStart, pageStart + PAGE_SIZE);
+
+  tbody.innerHTML = pageRows.map(p => {{
     const s = getStats(p);
     const l10 = (p.stats && p.stats['10'] && p.stats['10'].score) ?? null;
     return `<tr>
@@ -785,6 +800,17 @@ function renderGroup() {{
       }}).join('')}}
     </tr>`;
   }}).join('');
+
+  // Pagination controls
+  const pag = document.getElementById('pagination');
+  if (totalPages <= 1) {{ pag.innerHTML = ''; return; }}
+  const from = pageStart + 1, to = Math.min(pageStart + PAGE_SIZE, sorted.length);
+  pag.innerHTML = `
+    <button class="pag-btn" id="pag-prev" ${{currentPage===1?'disabled':''}}>‹ Préc.</button>
+    <span class="pag-info">${{from}}–${{to}} sur ${{sorted.length}}</span>
+    <button class="pag-btn" id="pag-next" ${{currentPage===totalPages?'disabled':''}}>Suiv. ›</button>`;
+  document.getElementById('pag-prev').addEventListener('click', () => {{ currentPage--; renderGroup(); window.scrollTo(0,0); }});
+  document.getElementById('pag-next').addEventListener('click', () => {{ currentPage++; renderGroup(); window.scrollTo(0,0); }});
 }}
 
 // ── Player view ───────────────────────────────────────────
@@ -856,9 +882,12 @@ function renderStatsGrid(stats, n) {{
 }}
 
 // ── Event listeners ───────────────────────────────────────
+// Any filter change resets to page 1
+function resetAndRender() {{ currentPage = 1; renderGroup(); }}
+
 document.getElementById('range-select').addEventListener('change', e => {{
   activeRange = parseInt(e.target.value);
-  renderGroup();
+  resetAndRender();
 }});
 
 // ── Multi-select helper ───────────────────────────────────
@@ -889,7 +918,7 @@ function setupMulti(wrapId, allCheckId, triggerId, state, labelFn) {{
       state.clear();
       itemCbs.forEach(cb => cb.checked = false);
       updateTrigger();
-      renderGroup();
+      resetAndRender();
     }}
   }});
 
@@ -898,7 +927,7 @@ function setupMulti(wrapId, allCheckId, triggerId, state, labelFn) {{
       if (cb.checked) {{ state.add(cb.value); allCb.checked = false; }}
       else {{ state.delete(cb.value); if (state.size === 0) allCb.checked = true; }}
       updateTrigger();
-      renderGroup();
+      resetAndRender();
     }});
   }});
 
@@ -941,7 +970,7 @@ function setupCompGroup(groupId) {{
     }});
     document.getElementById('comp-all').checked = selectedComp.size === 0;
     refreshTrigger();
-    renderGroup();
+    resetAndRender();
   }});
 
   subCbs.forEach(cb => {{
@@ -966,14 +995,14 @@ document.querySelectorAll('.agg-btn').forEach(btn => {{
     document.querySelectorAll('.agg-btn').forEach(b=>b.classList.remove('active'));
     btn.classList.add('active');
     aggMode = btn.dataset.agg;
-    renderGroup();
+    resetAndRender();
   }});
 }});
 
 document.getElementById('mins-slider').addEventListener('input', e => {{
   minMins = parseInt(e.target.value);
   document.getElementById('mins-val').textContent = '≥ ' + minMins + ' min';
-  renderGroup();
+  resetAndRender();
 }});
 
 document.getElementById('player-search').addEventListener('input', e => {{
