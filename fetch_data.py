@@ -142,18 +142,20 @@ def discover_avg_score_enum():
     return []
 
 
-def _stat_aliases():
-    """Generate all averageStats + averageScore aliases for the GQL query."""
+def _stat_aliases(include_avg_score=True):
+    """Generate averageStats aliases, optionally with averageScore (L5/L10/L40)."""
     lines = []
     for n, limit in RANGE_LIMITS.items():
         for t in STAT_TYPES:
             lines.append(f"r{n}_{t}: averageStats(limit: {limit}, type: {t})")
-    for n, score_type in SCORE_TYPES.items():
-        lines.append(f"score{n}: averageScore(type: {score_type})")
+    if include_avg_score:
+        for n, score_type in SCORE_TYPES.items():
+            lines.append(f"score{n}: averageScore(type: {score_type})")
     return "\n".join(lines)
 
 
-STAT_ALIASES = _stat_aliases()
+STAT_ALIASES          = _stat_aliases(include_avg_score=True)
+STAT_ALIASES_FALLBACK = _stat_aliases(include_avg_score=False)
 
 
 def _parse_player_stats(p):
@@ -162,16 +164,21 @@ def _parse_player_stats(p):
     for n in RANGES:
         s = {}
         for t in STAT_TYPES:
-            key = f"r{n}_{t}"
-            v = p.get(key)
+            v = p.get(f"r{n}_{t}")
             if v is not None:
                 s[t] = round(float(v), 2)
-        # Sorare's official L5/L10/L40 score via averageScore(type: ...)
         sc = p.get(f"score{n}")
         if sc is not None:
             s["score"] = round(float(sc), 2)
         stats[str(n)] = s if s else None
     return stats
+
+
+def _avg_scores_fallback(scores, n):
+    """Fallback: average of the n most-recent non-zero so5Scores (oldest→newest order)."""
+    played = [s for s in scores if s > 0]
+    subset = played[-n:] if len(played) >= n else played
+    return round(sum(subset) / len(subset), 2) if subset else None
 
 
 def get_player_slugs(comp_slug, position):
@@ -215,21 +222,18 @@ def get_player_slugs(comp_slug, position):
     return results
 
 
-def fetch_batch(slugs):
-    """Fetch averageStats + averageScore (L5/L10/L40) for a batch.
-    Returns {slug: {"stats": {...}}}."""
-    if not slugs:
-        return {}
+def _do_fetch(slugs, aliases, extra_fields=""):
+    """Low-level GQL fetch. Returns raw player list or None on unrecoverable error."""
     slugs_gql = ", ".join(f'"{s}"' for s in slugs)
     query = f"""{{
       football {{
         players(slugs: [{slugs_gql}]) {{
           slug
-          {STAT_ALIASES}
+          {aliases}
+          {extra_fields}
         }}
       }}
     }}"""
-
     for attempt in range(5):
         try:
             r = requests.post(SORARE_API, json={"query": query}, headers=build_headers(), timeout=60)
@@ -238,30 +242,70 @@ def fetch_batch(slugs):
                 print(f"  429 — waiting {wait}s...", flush=True)
                 time.sleep(wait)
                 continue
+            if r.status_code == 422:
+                print(f"  422 Unprocessable — {r.text[:400]}", file=sys.stderr, flush=True)
+                return None   # signal: try fallback, do not retry
             r.raise_for_status()
             body = r.json()
             if "errors" in body:
-                msg = body["errors"][0].get("message", "")
-                if "complexity" in msg.lower() and len(slugs) > 1:
-                    mid = len(slugs) // 2
-                    print(f"  Complexity — splitting {len(slugs)} → {mid}+{len(slugs)-mid}", flush=True)
-                    return {**fetch_batch(slugs[:mid]), **fetch_batch(slugs[mid:])}
-                print(f"  GQL error: {msg}", file=sys.stderr, flush=True)
-                return {}
-            players = (body.get("data") or {}).get("football", {}).get("players") or []
-            result = {}
-            for p in players:
-                slug = p.get("slug")
-                if not slug:
-                    continue
-                result[slug] = {"stats": _parse_player_stats(p)}
-            return result
+                return body["errors"][0].get("message", "UNKNOWN_ERROR")  # string = GQL error
+            return (body.get("data") or {}).get("football", {}).get("players") or []
         except Exception as exc:
             if attempt == 4:
-                print(f"  Batch failed: {exc}", file=sys.stderr, flush=True)
-                return {}
+                print(f"  Request failed: {exc}", file=sys.stderr, flush=True)
+                return []
             time.sleep(2 ** attempt)
-    return {}
+    return []
+
+
+def fetch_batch(slugs, _use_fallback=False):
+    """Fetch averageStats + L5/L10/L40 scores for a batch of player slugs.
+    Falls back to so5Scores if averageScore causes a 422.
+    Returns {slug: {"stats": {...}}}."""
+    if not slugs:
+        return {}
+
+    if _use_fallback:
+        aliases     = STAT_ALIASES_FALLBACK
+        extra       = "so5Scores(last: 40) { score }"
+    else:
+        aliases     = STAT_ALIASES
+        extra       = ""
+
+    raw = _do_fetch(slugs, aliases, extra)
+
+    # 422 → switch to fallback mode
+    if raw is None:
+        if not _use_fallback:
+            print("  Switching to so5Scores fallback for this run...", flush=True)
+            return fetch_batch(slugs, _use_fallback=True)
+        return {}
+
+    # GQL error string
+    if isinstance(raw, str):
+        if "complexity" in raw.lower() and len(slugs) > 1:
+            mid = len(slugs) // 2
+            print(f"  Complexity — splitting {len(slugs)} → {mid}+{len(slugs)-mid}", flush=True)
+            return {**fetch_batch(slugs[:mid], _use_fallback), **fetch_batch(slugs[mid:], _use_fallback)}
+        print(f"  GQL error: {raw}", file=sys.stderr, flush=True)
+        return {}
+
+    result = {}
+    for p in raw:
+        slug = p.get("slug")
+        if not slug:
+            continue
+        stats = _parse_player_stats(p)
+        if _use_fallback:
+            raw_scores = [s["score"] for s in (p.get("so5Scores") or []) if s.get("score") is not None]
+            for n in RANGES:
+                s = stats.get(str(n)) or {}
+                sc = _avg_scores_fallback(raw_scores, n)
+                if sc is not None:
+                    s["score"] = sc
+                    stats[str(n)] = s
+        result[slug] = {"stats": stats}
+    return result
 
 
 def main():
