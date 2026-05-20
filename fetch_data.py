@@ -239,7 +239,7 @@ def _do_fetch(slugs, aliases, extra_fields=""):
     query = f"""{{
       players(slugs: [{slugs_gql}]) {{
         slug
-        ... on FootballPlayer {{
+        ... on Player {{
           {aliases}
           {extra_fields}
         }}
