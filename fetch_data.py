@@ -239,8 +239,10 @@ def _do_fetch(slugs, aliases, extra_fields=""):
     query = f"""{{
       players(slugs: [{slugs_gql}]) {{
         slug
-        {aliases}
-        {extra_fields}
+        ... on FootballPlayer {{
+          {aliases}
+          {extra_fields}
+        }}
       }}
     }}"""
     for attempt in range(5):
