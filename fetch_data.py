@@ -226,12 +226,10 @@ def _do_fetch(slugs, aliases, extra_fields=""):
     """Low-level GQL fetch. Returns raw player list or None on unrecoverable error."""
     slugs_gql = ", ".join(f'"{s}"' for s in slugs)
     query = f"""{{
-      football {{
-        players(slugs: [{slugs_gql}]) {{
-          slug
-          {aliases}
-          {extra_fields}
-        }}
+      players(slugs: [{slugs_gql}]) {{
+        slug
+        {aliases}
+        {extra_fields}
       }}
     }}"""
     for attempt in range(5):
@@ -249,7 +247,7 @@ def _do_fetch(slugs, aliases, extra_fields=""):
             body = r.json()
             if "errors" in body:
                 return body["errors"][0].get("message", "UNKNOWN_ERROR")  # string = GQL error
-            return (body.get("data") or {}).get("football", {}).get("players") or []
+            return (body.get("data") or {}).get("players") or []
         except Exception as exc:
             if attempt == 4:
                 print(f"  Request failed: {exc}", file=sys.stderr, flush=True)
