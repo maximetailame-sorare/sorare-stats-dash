@@ -20,8 +20,8 @@ import requests
 
 SORARE_API = "https://api.sorare.com/graphql"
 POSITIONS = ["Goalkeeper", "Defender", "Midfielder", "Forward"]
-RANGES = [5, 10, 40]
-GAMES_DEPTH = 40            # profondeur demandée ; l'API peut renvoyer moins
+RANGES = [5, 10, 15]
+GAMES_DEPTH = 15            # playerGameScores ne renvoie pas plus de 15 matchs, même avec clé API
 INTL = "intl"               # périmètre « Matchs internationaux »
 ALL = "all"                 # périmètre « Tous les matchs »
 

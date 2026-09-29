@@ -209,7 +209,7 @@ details.method ul{margin:10px 0 0 18px;display:flex;flex-direction:column;gap:6p
   <button class="btn filters-toggle" id="filters-toggle">Filtres</button>
   <div class="filters" id="filters">
     <div class="f"><span class="flabel">Range</span>
-      <div class="seg" id="range-seg"><button data-v="5">L5</button><button data-v="10">L10</button><button data-v="40">L40</button></div>
+      <div class="seg" id="range-seg"></div>
     </div>
     <div class="f"><span class="flabel">Poste</span><div class="multi" id="m-pos"></div></div>
     <div class="f"><span class="flabel">Championnat</span><div class="multi" id="m-comp"></div></div>
@@ -260,7 +260,7 @@ details.method ul{margin:10px 0 0 18px;display:flex;flex-direction:column;gap:6p
       <h2>Comparaison</h2>
       <div class="actions">
         <select class="sel" id="cmp-scope"></select>
-        <div class="seg" id="cmp-range"><button data-v="5">L5</button><button data-v="10">L10</button><button data-v="40">L40</button></div>
+        <div class="seg" id="cmp-range"></div>
         <button class="btn" id="cmp-clear">Vider</button>
       </div>
     </div>
@@ -277,7 +277,7 @@ const POS_LABELS = {Goalkeeper:'Gardien',Defender:'Défenseur',Midfielder:'Milie
 const CAT_LABELS = {general:'Général',defending:'Défense',possession:'Possession',passing:'Passes',
   attacking:'Attaque',goalkeeping:'Gardien',decisive_pos:'Décisif +',decisive_neg:'Décisif −'};
 const ALL = 'all', INTL = 'intl', NO_NAT = '__none__';
-const DEFAULT_MINS = 30, DEFAULT_GAMES = 1, PAGE_SIZE = 100;
+const DEFAULT_MINS = 30, DEFAULT_GAMES = 3, PAGE_SIZE = 100;
 const DEFAULT_COLS = ['accurate_pass','successful_final_third_passes','duel_won','won_tackle',
   'interception_won','ontarget_scoring_att','goals','goal_assist'];
 const GK_COLS = ['saves','saved_ibox','good_high_claim','goals_conceded','clean_sheet_60',
@@ -314,10 +314,11 @@ function downloadCSV(name, rows){
 }
 
 // ── Données ───────────────────────────────────────────────
-let D, STATS, STAT_IDX, PLAYERS, ROWS, ROWS_BY_SCOPE, COMP_NAME, COMP_GROUP;
+let D, RANGES, STATS, STAT_IDX, PLAYERS, ROWS, ROWS_BY_SCOPE, COMP_NAME, COMP_GROUP;
 
 function prepare(raw){
   D = raw;
+  RANGES = raw.ranges;
   STATS = raw.stats.map(([key,label,cat,per]) => ({key,label,cat,per}));
   STAT_IDX = Object.fromEntries(STATS.map((s,i) => [s.key, i]));
   PLAYERS = raw.players.map(([slug,name,club,age,pos,nat,natCode], i) =>
@@ -354,7 +355,7 @@ const S = {
 function readHash(){
   const q = new URLSearchParams(location.hash.slice(1));
   if (q.get('tab')) S.tab = q.get('tab') === 'player' ? 'player' : 'group';
-  if ([5,10,40].includes(+q.get('r'))) S.range = +q.get('r');
+  if (RANGES.includes(+q.get('r'))) S.range = +q.get('r');
   for (const k of ['pos','comp','club','nat','cols']) S[k] = new Set(q.getAll(k));
   if (q.has('min')) S.minMins = Math.max(0, Math.min(90, +q.get('min') || 0));
   if (q.has('g')) S.minGames = Math.max(1, +q.get('g') || 1);
@@ -461,6 +462,8 @@ function filteredRows(){
 }
 
 function setupFilters(){
+  $('range-seg').innerHTML = rangeButtons(S.range);
+  $('cmp-range').innerHTML = rangeButtons(S.cmpRange);
   $('range-seg').addEventListener('click', e => {
     const v = +e.target.dataset.v; if (!v) return;
     S.range = v; update();
@@ -713,7 +716,7 @@ function renderMethod(){
   const items = [
     `Les moyennes sont recalculées à partir des stats match par match de l'API Sorare, sur les <strong>N derniers matchs joués</strong> (minutes &gt; 0) dans le périmètre choisi : une compétition, les matchs internationaux, ou tous les matchs.`,
     `Stats ramenées à <strong>90 minutes</strong> (total ÷ minutes jouées × 90), comme les moyennes Sorare. Exceptions, en moyenne par match : minutes jouées, clean sheet, double-double, triple-double, triple-triple. Un joueur entré 5 minutes peut donc afficher des valeurs extrêmes : le filtre « Min. jouées / match » est à ${DEFAULT_MINS} min par défaut.`,
-    `Historique disponible : ${d.requested || 40} matchs demandés par joueur, <strong>${d.max ?? '?'} au maximum</strong> reçus (médiane ${d.median ?? '?'}). Un L40 contient donc au plus ${d.max ?? '?'} matchs ; la colonne « Matchs » indique le nombre réellement utilisé.`,
+    `Historique : l'API Sorare renvoie au plus <strong>${d.max ?? 15} matchs</strong> par joueur (médiane ${d.median ?? '?'}), d'où les ranges L5, L10 et L15. Dans une compétition précise, un joueur peut avoir moins de matchs que la range : la colonne « Matchs » indique le nombre réellement utilisé, et le filtre « Matchs joués » est à ≥ ${DEFAULT_GAMES} par défaut.`,
     `« Seuil top 10 % » est la valeur à atteindre pour entrer dans les 10 % les plus hauts du groupe ; « Moy. top 10 % » est la moyenne de ces 10 %. Pour les stats négatives (fautes, erreurs…), le top correspond aussi aux valeurs les plus hautes.`,
     `Une stat hors du barème d'un poste (ex. arrêts pour un attaquant) est vide pour ce joueur et n'entre pas dans les agrégats.`,
     `« Équipe nationale » = sélection active selon Sorare (activeNationalTeam). Beaucoup d'internationaux n'en ont pas en dehors des périodes de rassemblement : ils sont classés « Sans sélection ».`,
@@ -756,6 +759,7 @@ function setupPlayerView(){
 }
 
 const playerBySlug = slug => PLAYERS.find(p => p.slug === slug);
+const rangeButtons = active => RANGES.map(n => `<button data-v="${n}" class="${n === active ? 'active' : ''}">L${n}</button>`).join('');
 
 function openPlayer(slug, scope = ALL){
   S.player = slug; S.pScope = scope; S.pRange = S.range;
@@ -782,7 +786,7 @@ function renderPlayerCard(){
     <button class="btn ${inCmp ? '' : 'primary'}" id="cmp-toggle" ${!inCmp && S.cmp.length >= 4 ? 'disabled' : ''}>${inCmp ? 'Retirer de la comparaison' : '+ Comparer'}</button></div>
     <div class="pcontrols">
       <select class="sel" id="p-scope">${scopesOf.map(s => `<option value="${esc(s)}" ${s === S.pScope ? 'selected' : ''}>${esc(COMP_NAME[s] || s)}</option>`).join('')}</select>
-      <div class="seg" id="p-range">${[5,10,40].map(n => `<button data-v="${n}" class="${n === R ? 'active' : ''}">L${n}</button>`).join('')}</div>
+      <div class="seg" id="p-range">${rangeButtons(R)}</div>
     </div>`;
   if (!b){
     html += '<div class="empty">Pas de match joué dans ce périmètre.</div>';
