@@ -1,73 +1,98 @@
+"""Collecte les stats in-game Sorare et écrit data.json (lu par index.html).
+
+Les moyennes sont recalculées à partir des stats match par match
+(playerGameScores + detailedScore), ce qui permet de les calculer par
+compétition. Méthode, identique à averageStats de Sorare :
+  - on garde les N derniers matchs joués (minutes > 0) dans le périmètre ;
+  - minutes et stats « par match » : moyenne par match joué ;
+  - toutes les autres stats : total / minutes jouées × 90 ;
+  - score : moyenne des scores SO5 de ces matchs.
+"""
 import json
 import os
+import re
 import sys
 import time
+import statistics
+from datetime import datetime, timezone
+
 import requests
-from datetime import datetime
 
 SORARE_API = "https://api.sorare.com/graphql"
 POSITIONS = ["Goalkeeper", "Defender", "Midfielder", "Forward"]
-RANGES = [5, 10, 40]
-RANGE_LIMITS = {5: "LAST_5", 10: "LAST_10", 40: "LAST_40"}
+RANGES = [5, 10, 15]
+GAMES_DEPTH = 15            # playerGameScores ne renvoie pas plus de 15 matchs, même avec clé API
+INTL = "intl"               # périmètre « Matchs internationaux »
+ALL = "all"                 # périmètre « Tous les matchs »
 
-# Direct averageScore enum values matching Sorare's L5/L10/L40 display
-SCORE_TYPES = {
-    5:  "LAST_FIVE_SO5_AVERAGE_SCORE",
-    10: "LAST_TEN_PLAYED_SO5_AVERAGE_SCORE",
-    40: "LAST_FORTY_SO5_AVERAGE_SCORE",
-}
+REQUEST_DELAY = float(os.environ.get("REQUEST_DELAY", "1.0"))
+INITIAL_BATCH_SIZE = int(os.environ.get("BATCH_SIZE", "50"))  # réduit automatiquement si complexité trop élevée
+# Pour tester en local sur un sous-ensemble : ONLY_COMPS="ligue-1-fr,premier-league-gb-eng"
+ONLY_COMPS = [c for c in os.environ.get("ONLY_COMPS", "").split(",") if c]
+OUTPUT = os.environ.get("OUTPUT", "data.json")
 
-REQUEST_DELAY = 1.5
-INITIAL_BATCH_SIZE = 5  # auto-splits on complexity error
-
-STAT_TYPES = [
-    "ACCURATE_LONG_BALLS", "ACCURATE_PASS", "ASSIST_PENALTY_WON",
-    "BIG_CHANCE_CREATED", "BIG_CHANCE_MISSED", "CLEARANCE_OFF_LINE",
-    "DUEL_LOST", "DUEL_WON", "EFFECTIVE_CLEARANCE", "ERROR_LEAD_TO_GOAL",
-    "FOULS", "GOALS", "INTERCEPTION_WON", "LAST_MAN_TACKLE", "LOST_CORNERS",
-    "MINS_PLAYED", "MISSED_PASS", "ONTARGET_SCORING_ATT", "OWN_GOALS",
-    "PEN_AREA_ENTRIES", "PENALTY_CONCEDED", "PENALTY_SAVE", "PENALTY_WON",
-    "POSS_LOST_CTRL", "POSS_WON", "RED_CARD", "SAVES",
-    "SUCCESSFUL_FINAL_THIRD_PASSES", "WAS_FOULED", "WON_CONTEST", "WON_TACKLE",
-    "YELLOW_CARD",
+# (clé API, libellé, catégorie). L'ordre est celui de l'affichage.
+STATS = [
+    ("mins_played", "Minutes jouées", "general"),
+    ("fouls", "Fautes", "general"),
+    ("was_fouled", "Fautes subies", "general"),
+    ("yellow_card", "Carton jaune", "general"),
+    ("error_lead_to_shot", "Erreurs menant à un tir", "general"),
+    ("penalty_won", "Penaltys obtenus", "general"),
+    ("penalty_kick_missed", "Penaltys manqués", "general"),
+    ("goals_conceded", "Buts encaissés", "general"),
+    ("won_tackle", "Tacles réussis", "defending"),
+    ("effective_clearance", "Dégagements efficaces", "defending"),
+    ("blocked_cross", "Centres contrés", "defending"),
+    ("outfielder_block", "Tirs contrés", "defending"),
+    ("clean_sheet_60", "Clean sheet (60 min)", "defending"),
+    ("double_double", "Double-double", "defending"),
+    ("triple_double", "Triple-double", "defending"),
+    ("triple_triple", "Triple-triple", "defending"),
+    ("duel_won", "Duels gagnés", "possession"),
+    ("duel_lost", "Duels perdus", "possession"),
+    ("interception_won", "Interceptions", "possession"),
+    ("poss_won", "Ballons récupérés", "possession"),
+    ("poss_lost_ctrl", "Pertes de balle", "possession"),
+    ("accurate_pass", "Passes réussies", "passing"),
+    ("missed_pass", "Passes ratées", "passing"),
+    ("successful_final_third_passes", "Passes dernier tiers", "passing"),
+    ("accurate_long_balls", "Longs ballons réussis", "passing"),
+    ("long_pass_own_to_opp_success", "Longs ballons vers le camp adverse", "passing"),
+    ("adjusted_total_att_assist", "Passes menant à un tir", "passing"),
+    ("big_chance_created", "Grosses occasions créées", "passing"),
+    ("ontarget_scoring_att", "Tirs cadrés", "attacking"),
+    ("won_contest", "Dribbles réussis", "attacking"),
+    ("pen_area_entries", "Entrées en surface", "attacking"),
+    ("big_chance_missed", "Grosses occasions manquées", "attacking"),
+    ("saves", "Arrêts", "goalkeeping"),
+    ("saved_ibox", "Arrêts dans la surface", "goalkeeping"),
+    ("dive_save", "Arrêts en plongeon", "goalkeeping"),
+    ("dive_catch", "Arrêts en plongeon captés", "goalkeeping"),
+    ("good_high_claim", "Sorties aériennes réussies", "goalkeeping"),
+    ("punches", "Ballons boxés", "goalkeeping"),
+    ("gk_smother", "Sorties dans les pieds", "goalkeeping"),
+    ("accurate_keeper_sweeper", "Sorties hors surface réussies", "goalkeeping"),
+    ("cross_not_claimed", "Centres non captés", "goalkeeping"),
+    ("six_second_violation", "Règle des 6 secondes", "goalkeeping"),
+    ("goals", "Buts", "decisive_pos"),
+    ("goal_assist", "Passes décisives", "decisive_pos"),
+    ("assist_penalty_won", "Penalty obtenu (assist)", "decisive_pos"),
+    ("clearance_off_line", "Sauvetages sur la ligne", "decisive_pos"),
+    ("last_man_tackle", "Tacle dernier homme", "decisive_pos"),
+    ("penalty_save", "Penaltys arrêtés", "decisive_pos"),
+    ("red_card", "Carton rouge", "decisive_neg"),
+    ("own_goals", "CSC", "decisive_neg"),
+    ("penalty_conceded", "Penaltys concédés", "decisive_neg"),
+    ("error_lead_to_goal", "Erreurs menant au but", "decisive_neg"),
 ]
+STAT_KEYS = [k for k, _, _ in STATS]
+# Moyennées par match joué plutôt que ramenées à 90 minutes
+PER_MATCH = {"mins_played", "clean_sheet_60", "double_double", "triple_double", "triple_triple"}
+GK_STATS = {k for k, _, cat in STATS if cat == "goalkeeping"}
 
-STAT_LABELS = {
-    "score": "Score SO5",
-    "ACCURATE_LONG_BALLS": "Longs ballons réussis",
-    "ACCURATE_PASS": "Passes réussies",
-    "ASSIST_PENALTY_WON": "Assist penalty obtenu",
-    "BIG_CHANCE_CREATED": "Grosses occasions créées",
-    "BIG_CHANCE_MISSED": "Grosses occasions manquées",
-    "CLEARANCE_OFF_LINE": "Dégagements sur la ligne",
-    "DUEL_LOST": "Duels perdus",
-    "DUEL_WON": "Duels gagnés",
-    "EFFECTIVE_CLEARANCE": "Dégagements efficaces",
-    "ERROR_LEAD_TO_GOAL": "Erreurs menant au but",
-    "FOULS": "Fautes",
-    "GOALS": "Buts",
-    "INTERCEPTION_WON": "Interceptions",
-    "LAST_MAN_TACKLE": "Tacle dernier homme",
-    "LOST_CORNERS": "Corners perdus",
-    "MINS_PLAYED": "Minutes jouées",
-    "MISSED_PASS": "Passes ratées",
-    "ONTARGET_SCORING_ATT": "Tirs cadrés",
-    "OWN_GOALS": "CSC",
-    "PEN_AREA_ENTRIES": "Entrées en surface",
-    "PENALTY_CONCEDED": "Penaltys concédés",
-    "PENALTY_SAVE": "Penaltys arrêtés",
-    "PENALTY_WON": "Penaltys obtenus",
-    "POSS_LOST_CTRL": "Pertes de balle",
-    "POSS_WON": "Ballons récupérés",
-    "RED_CARD": "Carton rouge",
-    "SAVES": "Arrêts",
-    "SUCCESSFUL_FINAL_THIRD_PASSES": "Passes dernier tiers",
-    "WAS_FOULED": "Fautes subies",
-    "WON_CONTEST": "Dribbles",
-    "WON_TACKLE": "Tacles réussis",
-    "YELLOW_CARD": "Carton jaune",
-}
-
+# Les slugs sont ceux de searchPlayers (active_competitions) ; ce sont aussi
+# ceux de anyGame.competition.slug.
 COMPETITIONS = {
     "premier-league-gb-eng": "Premier League",
     "football-league-championship": "EFL Championship",
@@ -78,24 +103,24 @@ COMPETITIONS = {
     "ligue-1-fr": "Ligue 1",
     "ligue-2-fr": "Ligue 2",
     "k-league-1": "K League 1",
-    "primera-liga-pt": "Primeira Liga",
+    "primeira-liga-pt": "Primeira Liga",
     "spor-toto-super-lig": "Süper Lig",
     "premiership-gb-sct": "Scottish Premiership",
     "austrian-bundesliga": "Austrian Bundesliga",
     "superliga-dk": "Danish Superliga",
     "superliga-argentina-de-futbol": "Superliga Argentina",
     "mlspa": "Major League Soccer",
-    "j1-100-year-vision-league": "J1 League",
+    "j1-league": "J1 League",
     "uefa-champions-league": "Champions League",
     "uefa-europa-league": "Europa League",
     "uefa-europa-conference-league": "Europa Conference League",
-    "eredivisie-nl": "Eredivisie",
+    "eredivisie": "Eredivisie",
     "jupiler-pro-league": "Jupiler Pro League",
     "serie-a-it": "Serie A",
 }
 
 CHALLENGER_SLUGS = {
-    "primera-liga-pt", "spor-toto-super-lig", "premiership-gb-sct",
+    "primeira-liga-pt", "spor-toto-super-lig", "premiership-gb-sct",
     "austrian-bundesliga", "superliga-dk", "serie-a-it",
 }
 
@@ -103,7 +128,6 @@ CONTENDER_SLUGS = {
     "ligue-2-fr", "2-bundesliga", "segunda-division-es",
     "superliga-argentina-de-futbol", "football-league-championship",
 }
-
 
 
 def build_headers():
@@ -114,86 +138,33 @@ def build_headers():
     return headers
 
 
-def gql(query, retries=5):
+def post(query, timeout=60, retries=8):
+    """POST GraphQL. Renvoie (data, error_message)."""
     for attempt in range(retries):
         try:
-            r = requests.post(SORARE_API, json={"query": query}, headers=build_headers(), timeout=30)
+            r = requests.post(SORARE_API, json={"query": query}, headers=build_headers(), timeout=timeout)
             if r.status_code == 429:
-                wait = 10 * (attempt + 1)
+                retry_after = r.headers.get("Retry-After", "")
+                wait = int(retry_after) + 1 if retry_after.isdigit() else 10 * (attempt + 1)
                 print(f"  429 rate limit — waiting {wait}s...", file=sys.stderr, flush=True)
                 time.sleep(wait)
                 continue
+            if r.status_code == 422:
+                return None, r.text[:400]
             r.raise_for_status()
             body = r.json()
             if "errors" in body:
-                msg = body["errors"][0].get("message", "")
-                print(f"  GQL error: {msg}", file=sys.stderr, flush=True)
-                return None
-            return body.get("data")
+                return body.get("data"), body["errors"][0].get("message", "UNKNOWN_ERROR")
+            return body.get("data"), None
         except Exception as exc:
             if attempt == retries - 1:
-                print(f"  Request failed: {exc}", file=sys.stderr, flush=True)
-                return None
+                return None, f"Request failed: {exc}"
             time.sleep(2 ** attempt)
-    return None
-
-
-
-
-def discover_avg_score_enum():
-    """Try to discover valid AveragePlayerScore enum values via __type introspection."""
-    query = '{ __type(name: "AveragePlayerScore") { enumValues { name } } }'
-    data = gql(query)
-    if data and data.get("__type"):
-        values = [e["name"] for e in (data["__type"].get("enumValues") or []) if e.get("name")]
-        if values:
-            print(f"AveragePlayerScore enum values: {values}", flush=True)
-            return values
-    print("AveragePlayerScore introspection failed or blocked — using so5Scores fallback", flush=True)
-    return []
-
-
-def _stat_aliases(include_avg_score=True):
-    """Generate averageStats aliases, optionally with averageScore (L5/L10/L40)."""
-    lines = []
-    for n, limit in RANGE_LIMITS.items():
-        for t in STAT_TYPES:
-            lines.append(f"r{n}_{t}: averageStats(limit: {limit}, type: {t})")
-    if include_avg_score:
-        for n, score_type in SCORE_TYPES.items():
-            lines.append(f"score{n}: averageScore(type: {score_type})")
-    return "\n".join(lines)
-
-
-STAT_ALIASES          = _stat_aliases(include_avg_score=True)
-STAT_ALIASES_FALLBACK = _stat_aliases(include_avg_score=False)
-
-
-def _parse_player_stats(p):
-    """Extract stats dict {range: {type: value}} from a player GQL response."""
-    stats = {}
-    for n in RANGES:
-        s = {}
-        for t in STAT_TYPES:
-            v = p.get(f"r{n}_{t}")
-            if v is not None:
-                s[t] = round(float(v), 2)
-        sc = p.get(f"score{n}")
-        if sc is not None:
-            s["score"] = round(float(sc), 2)
-        stats[str(n)] = s if s else None
-    return stats
-
-
-def _avg_scores_fallback(scores, n):
-    """Fallback: average of the n most-recent non-zero so5Scores (oldest→newest order)."""
-    played = [s for s in scores if s > 0]
-    subset = played[-n:] if len(played) >= n else played
-    return round(sum(subset) / len(subset), 2) if subset else None
+    return None, "Too many retries"
 
 
 def get_player_slugs(comp_slug, position):
-    """Lightweight query — just slugs, name, club. Paginates until exhausted."""
+    """Liste les joueurs d'une compétition et d'un poste. Pagine jusqu'au bout."""
     results = []
     page = 1
     while True:
@@ -210,21 +181,27 @@ def get_player_slugs(comp_slug, position):
                 displayName
                 age
                 activeClub {{ name }}
+                activeNationalTeam {{ name country {{ code }} }}
               }}
             }}
           }}
         }}
         """
-        data = gql(query)
-        hits = (data or {}).get("searchPlayers", {}).get("hits") or []
+        data, err = post(query, timeout=30)
+        if err:
+            print(f"  GQL error: {err}", file=sys.stderr, flush=True)
+        hits = ((data or {}).get("searchPlayers") or {}).get("hits") or []
         for h in hits:
             p = h.get("player") or {}
             if p.get("slug"):
+                nat = p.get("activeNationalTeam") or {}
                 results.append({
                     "slug": p["slug"],
                     "name": p.get("displayName") or p["slug"],
                     "club": (p.get("activeClub") or {}).get("name", ""),
                     "age": p.get("age"),
+                    "nat": nat.get("name"),
+                    "nat_code": (nat.get("country") or {}).get("code"),
                 })
         if len(hits) < 100:
             break
@@ -233,848 +210,178 @@ def get_player_slugs(comp_slug, position):
     return results
 
 
-def _do_fetch(slugs, aliases, extra_fields=""):
-    """Low-level GQL fetch. Returns raw player list or None on unrecoverable error."""
-    slugs_gql = ", ".join(f'"{s}"' for s in slugs)
-    query = f"""{{
-      players(slugs: [{slugs_gql}]) {{
-        slug
-        ... on Player {{
-          {aliases}
-          {extra_fields}
-        }}
+GAMES_QUERY = """{{
+  players(slugs: [{slugs}]) {{
+    slug
+    ... on Player {{
+      playerGameScores(last: {depth}) {{
+        score
+        anyGame {{ date competition {{ slug }} ... on Game {{ homeTeam {{ __typename }} }} }}
+        detailedScore {{ stat statValue }}
       }}
-    }}"""
-    for attempt in range(5):
-        try:
-            r = requests.post(SORARE_API, json={"query": query}, headers=build_headers(), timeout=60)
-            if r.status_code == 429:
-                wait = 10 * (attempt + 1)
-                print(f"  429 — waiting {wait}s...", flush=True)
-                time.sleep(wait)
-                continue
-            if r.status_code == 422:
-                print(f"  422 Unprocessable — {r.text[:400]}", file=sys.stderr, flush=True)
-                return None   # signal: try fallback, do not retry
-            r.raise_for_status()
-            body = r.json()
-            if "errors" in body:
-                return body["errors"][0].get("message", "UNKNOWN_ERROR")  # string = GQL error
-            return (body.get("data") or {}).get("players") or []
-        except Exception as exc:
-            if attempt == 4:
-                print(f"  Request failed: {exc}", file=sys.stderr, flush=True)
-                return []
-            time.sleep(2 ** attempt)
-    return []
+    }}
+  }}
+}}"""
+
+_batch_size = INITIAL_BATCH_SIZE
 
 
-def fetch_batch(slugs, _use_fallback=False):
-    """Fetch averageStats + L5/L10/L40 scores for a batch of player slugs.
-    Falls back to so5Scores if averageScore causes a 422.
-    Returns {slug: {"stats": {...}}}."""
+def fetch_games(slugs):
+    """Renvoie {slug: [match, ...]} ; un match = {date, comp, intl, score, stats}.
+    Réduit la taille des lots quand l'API signale une complexité trop élevée."""
+    global _batch_size
     if not slugs:
         return {}
-
-    if _use_fallback:
-        aliases     = STAT_ALIASES_FALLBACK
-        extra       = "so5Scores(last: 40) { score }"
-    else:
-        aliases     = STAT_ALIASES
-        extra       = ""
-
-    raw = _do_fetch(slugs, aliases, extra)
-
-    # 422 → switch to fallback mode
-    if raw is None:
-        if not _use_fallback:
-            print("  Switching to so5Scores fallback for this run...", flush=True)
-            return fetch_batch(slugs, _use_fallback=True)
-        return {}
-
-    # GQL error string
-    if isinstance(raw, str):
-        if "complexity" in raw.lower() and len(slugs) > 1:
-            mid = len(slugs) // 2
-            print(f"  Complexity — splitting {len(slugs)} → {mid}+{len(slugs)-mid}", flush=True)
-            return {**fetch_batch(slugs[:mid], _use_fallback), **fetch_batch(slugs[mid:], _use_fallback)}
-        print(f"  GQL error: {raw}", file=sys.stderr, flush=True)
-        return {}
-
+    query = GAMES_QUERY.format(slugs=", ".join(f'"{s}"' for s in slugs), depth=GAMES_DEPTH)
+    data, err = post(query)
+    if err and "complexity" in err.lower() and len(slugs) > 1:
+        m = re.search(r"complexity of (\d+).*?max complexity of (\d+)", err)
+        if m:
+            cur, mx = int(m.group(1)), int(m.group(2))
+            new_size = max(1, int(len(slugs) * mx / cur * 0.9))
+        else:
+            new_size = max(1, len(slugs) // 2)
+        if new_size < _batch_size:
+            print(f"  Complexity — batch size {_batch_size} → {new_size}", flush=True)
+            _batch_size = new_size
+        out = {}
+        for i in range(0, len(slugs), new_size):
+            out.update(fetch_games(slugs[i:i + new_size]))
+            time.sleep(REQUEST_DELAY)
+        return out
+    if err:
+        print(f"  GQL error: {err[:200]}", file=sys.stderr, flush=True)
     result = {}
-    for p in raw:
-        slug = p.get("slug")
-        if not slug:
+    for p in (data or {}).get("players") or []:
+        if not p or not p.get("slug"):
             continue
-        stats = _parse_player_stats(p)
-        if _use_fallback:
-            raw_scores = [s["score"] for s in (p.get("so5Scores") or []) if s.get("score") is not None]
-            for n in RANGES:
-                s = stats.get(str(n)) or {}
-                sc = _avg_scores_fallback(raw_scores, n)
-                if sc is not None:
-                    s["score"] = sc
-                    stats[str(n)] = s
-        result[slug] = {"stats": stats}
+        games = []
+        for g in p.get("playerGameScores") or []:
+            game = g.get("anyGame") or {}
+            stats = {d["stat"]: d["statValue"] for d in (g.get("detailedScore") or []) if d.get("stat")}
+            games.append({
+                "date": game.get("date") or "",
+                "comp": (game.get("competition") or {}).get("slug"),
+                "intl": (game.get("homeTeam") or {}).get("__typename") == "NationalTeam",
+                "score": g.get("score"),
+                "stats": stats,
+            })
+        games.sort(key=lambda x: x["date"], reverse=True)
+        result[p["slug"]] = games
     return result
 
 
+def r1(v):
+    """Arrondi compact pour le JSON."""
+    v = round(v, 2)
+    return int(v) if v == int(v) else v
+
+
+def compute_block(games, n, position):
+    """Moyennes sur les n derniers matchs joués de la liste (déjà triée, récents d'abord).
+    Renvoie [nb_matchs, score, stat1, stat2, ...] ou None."""
+    played = [g for g in games if (g["stats"].get("mins_played") or 0) > 0][:n]
+    if not played:
+        return None
+    mins = sum(g["stats"]["mins_played"] for g in played)
+    scores = [g["score"] for g in played if g["score"] is not None]
+    block = [len(played), r1(sum(scores) / len(scores)) if scores else None]
+    for k in STAT_KEYS:
+        # L'API renvoie les stats gardien (à 0) pour tous les postes : on ne les garde que pour les gardiens
+        if k in GK_STATS and position != "Goalkeeper":
+            block.append(None)
+            continue
+        present = [g["stats"][k] for g in played if k in g["stats"]]
+        if not present:          # stat absente du barème de ce joueur (ex. arrêts pour un attaquant)
+            block.append(None)
+            continue
+        total = sum(present)
+        block.append(r1(total / len(played)) if k in PER_MATCH else r1(total / mins * 90))
+    return block
+
+
 def main():
-    competitions = COMPETITIONS
+    competitions = {k: v for k, v in COMPETITIONS.items() if not ONLY_COMPS or k in ONLY_COMPS}
     print(f"Using {len(competitions)} competitions", flush=True)
 
-    # Discover averageScore enum values (diagnostic + future use)
-    discover_avg_score_enum()
-
-    # Step 1: collect all player metadata per (comp, position)
-    player_meta = {}  # slug -> {name, club, comps: [...]}
+    # Étape 1 : liste des joueurs par (compétition, poste)
+    player_meta = {}
     for comp_slug, comp_name in competitions.items():
         for position in POSITIONS:
-            print(f"Listing {position}s — {comp_name}...", flush=True)
-            for p in get_player_slugs(comp_slug, position):
-                slug = p["slug"]
-                if slug not in player_meta:
-                    player_meta[slug] = {"name": p["name"], "club": p["club"], "age": p.get("age"), "comps": []}
-                player_meta[slug]["comps"].append({
-                    "comp_slug": comp_slug, "comp_name": comp_name, "position": position,
-                })
+            found = get_player_slugs(comp_slug, position)
+            print(f"Listing {position}s — {comp_name}: {len(found)}", flush=True)
+            for p in found:
+                meta = player_meta.setdefault(p["slug"], {**p, "position": position, "comps": []})
+                if comp_slug not in meta["comps"]:
+                    meta["comps"].append(comp_slug)
             time.sleep(REQUEST_DELAY)
 
     all_slugs = list(player_meta.keys())
     total = len(all_slugs)
 
-    # Step 2: fetch averageStats + averageScore (L5/L10/L40) for all unique players
-    print(f"\nFetching stats for {total} unique players...", flush=True)
-    player_data = {}
-    for i in range(0, total, INITIAL_BATCH_SIZE):
-        batch = all_slugs[i: i + INITIAL_BATCH_SIZE]
-        print(f"  {i}/{total}...", flush=True)
-        player_data.update(fetch_batch(batch))
+    # Étape 2 : matchs détaillés
+    print(f"\nFetching games for {total} unique players...", flush=True)
+    player_games = {}
+    i = 0
+    while i < total:
+        batch = all_slugs[i: i + _batch_size]
+        print(f"  {i}/{total} (batch {len(batch)})...", flush=True)
+        player_games.update(fetch_games(batch))
+        i += len(batch)
         time.sleep(REQUEST_DELAY)
 
-    # Step 3: build final list (one entry per player × comp × position)
-    all_players = []
+    depths = [len(g) for g in player_games.values()]
+    depth_info = {
+        "requested": GAMES_DEPTH,
+        "max": max(depths) if depths else 0,
+        "median": statistics.median(depths) if depths else 0,
+    }
+    print(f"\nGames per player: {depth_info}", flush=True)
+
+    # Étape 3 : une ligne par (joueur, périmètre)
+    players_out, rows = [], []
     for slug, meta in player_meta.items():
-        stats = player_data.get(slug, {}).get("stats", {})
+        games = player_games.get(slug)
+        if not games:
+            continue
+        idx = len(players_out)
+        players_out.append([slug, meta["name"], meta["club"], meta["age"], meta["position"],
+                            meta["nat"], meta["nat_code"]])
+        scopes = {ALL: games}
         for c in meta["comps"]:
-            all_players.append({
-                "slug": slug,
-                "name": meta["name"],
-                "club": meta["club"],
-                "age": meta.get("age"),
-                "position": c["position"],
-                "comp_slug": c["comp_slug"],
-                "comp_name": c["comp_name"],
-                "stats": {str(n): stats.get(str(n)) for n in RANGES},
-            })
-
-    print(f"\nDone — {len(all_players)} entries, {total} unique players", flush=True)
-    return all_players, competitions
-
-
-def generate_html(players, competitions, last_updated):
-    data_json = json.dumps({
-        "last_updated": last_updated,
-        "players": players,
-        "stat_labels": STAT_LABELS,
-    }, ensure_ascii=False)
-
-    def group_values(slugs):
-        return " ".join(slug for slug in competitions if slug in slugs)
-
-    grouped_slugs = CHALLENGER_SLUGS | CONTENDER_SLUGS
-    regular = sorted(
-        ((slug, name) for slug, name in competitions.items() if slug not in grouped_slugs),
-        key=lambda x: x[1]
-    )
-    challenger = sorted(
-        ((slug, name) for slug, name in competitions.items() if slug in CHALLENGER_SLUGS),
-        key=lambda x: x[1]
-    )
-    contender = sorted(
-        ((slug, name) for slug, name in competitions.items() if slug in CONTENDER_SLUGS),
-        key=lambda x: x[1]
-    )
-
-    def items_html(items, cls=""):
-        return "\n".join(
-            f'<label class="multi-option {cls}"><input type="checkbox" value="{slug}"> {name}</label>'
-            for slug, name in items
-        )
-
-    comp_checkboxes = f"""
-{items_html(regular)}
-<label class="multi-option group-header"><input type="checkbox" id="comp-contender" data-group="{group_values(CONTENDER_SLUGS)}"> Contender</label>
-{items_html(contender, "sub-option")}
-<label class="multi-option group-header"><input type="checkbox" id="comp-challenger" data-group="{group_values(CHALLENGER_SLUGS)}"> Challenger</label>
-{items_html(challenger, "sub-option")}
-"""
-
-    all_stats = ["score"] + STAT_TYPES
-    stat_labels_js = json.dumps(STAT_LABELS)
-
-    return f"""<!DOCTYPE html>
-<html lang="fr">
-<head>
-  <meta charset="UTF-8"/>
-  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-  <title>Sorare Stats Dashboard</title>
-  <style>
-    *{{box-sizing:border-box;margin:0;padding:0}}
-    body{{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#0f172a;color:#e2e8f0;min-height:100vh}}
-    header{{background:#1e293b;border-bottom:1px solid #334155;padding:18px 28px;display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:12px}}
-    header h1{{font-size:1.3rem;font-weight:700;color:#f1f5f9}}
-    #last-updated{{font-size:0.75rem;color:#64748b}}
-    .tabs{{display:flex;gap:0;border-bottom:1px solid #334155;background:#1e293b;padding:0 28px}}
-    .tab{{padding:12px 20px;cursor:pointer;font-size:0.85rem;font-weight:600;color:#64748b;border-bottom:2px solid transparent;transition:all .15s}}
-    .tab.active{{color:#818cf8;border-bottom-color:#818cf8}}
-    .tab-content{{display:none}}.tab-content.active{{display:block}}
-    .controls{{padding:20px 28px 0;display:flex;flex-direction:column;gap:12px}}
-    .filter-group{{display:flex;align-items:center;gap:8px;flex-wrap:wrap}}
-    .filter-label{{font-size:0.72rem;font-weight:700;color:#94a3b8;text-transform:uppercase;letter-spacing:.06em;min-width:90px}}
-    .filter-btn{{background:#1e293b;border:1px solid #334155;color:#94a3b8;padding:5px 12px;border-radius:5px;cursor:pointer;font-size:0.8rem;transition:all .15s}}
-    .filter-btn:hover{{border-color:#6366f1;color:#a5b4fc}}
-    .filter-btn.active{{background:#6366f1;border-color:#6366f1;color:#fff;font-weight:600}}
-    .range-btn{{border-radius:5px}}
-    select.filter-select{{background:#1e293b;border:1px solid #334155;color:#e2e8f0;padding:5px 10px;border-radius:5px;font-size:0.82rem;cursor:pointer;outline:none}}
-    select.filter-select:focus{{border-color:#6366f1}}
-    .multi-wrap{{position:relative;display:inline-block}}
-    .multi-trigger{{background:#1e293b;border:1px solid #334155;color:#e2e8f0;padding:5px 28px 5px 10px;border-radius:5px;font-size:0.82rem;cursor:pointer;user-select:none;min-width:140px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}}
-    .multi-trigger::after{{content:'▾';position:absolute;right:9px;top:50%;transform:translateY(-50%);color:#64748b;pointer-events:none}}
-    .multi-trigger.has-selection{{border-color:#6366f1;color:#a5b4fc}}
-    .multi-dropdown{{display:none;position:absolute;top:calc(100% + 4px);left:0;background:#1e293b;border:1px solid #334155;border-radius:6px;z-index:100;min-width:200px;max-height:280px;overflow-y:auto;box-shadow:0 8px 24px #0008}}
-    .multi-wrap.open .multi-dropdown{{display:block}}
-    .multi-option{{display:flex;align-items:center;gap:8px;padding:7px 12px;cursor:pointer;font-size:0.82rem;color:#cbd5e1;transition:background .1s}}
-    .multi-option:hover{{background:#334155}}
-    .multi-option input[type=checkbox]{{accent-color:#6366f1;cursor:pointer}}
-    .multi-option.all-opt{{border-bottom:1px solid #334155;color:#94a3b8;font-weight:600}}
-    .multi-option.group-header{{border-top:1px solid #334155;color:#94a3b8;font-weight:600;margin-top:2px}}
-    .multi-option.sub-option{{padding-left:24px;color:#94a3b8}}
-    .club-search-wrap{{padding:6px 8px;border-bottom:1px solid #334155}}
-    #club-search-input{{width:100%;background:#0f172a;border:1px solid #334155;color:#e2e8f0;padding:5px 8px;border-radius:4px;font-size:0.8rem;outline:none}}
-    #club-search-input:focus{{border-color:#6366f1}}
-    .slider-group{{display:flex;align-items:center;gap:12px;flex-wrap:wrap}}
-    .slider-group input[type=range]{{-webkit-appearance:none;width:200px;height:4px;border-radius:2px;background:#334155;outline:none}}
-    .slider-group input[type=range]::-webkit-slider-thumb{{-webkit-appearance:none;width:14px;height:14px;border-radius:50%;background:#6366f1;cursor:pointer}}
-    .slider-val{{font-size:0.82rem;color:#e2e8f0;min-width:90px}}
-    .search-wrap{{padding:16px 28px 0}}
-    #player-search{{background:#1e293b;border:1px solid #334155;color:#e2e8f0;padding:8px 14px;border-radius:6px;font-size:0.9rem;width:320px}}
-    #player-search:focus{{outline:none;border-color:#6366f1}}
-    .aggregate-box{{margin:16px 28px 0;background:#1e293b;border:1px solid #334155;border-radius:8px;padding:16px 20px}}
-    .aggregate-box h3{{font-size:0.8rem;font-weight:700;color:#94a3b8;text-transform:uppercase;letter-spacing:.05em;margin-bottom:12px}}
-    .agg-stats{{display:flex;flex-wrap:wrap;gap:10px}}
-    .agg-stat{{background:#0f172a;border-radius:6px;padding:8px 12px;min-width:100px}}
-    .agg-stat .label{{font-size:0.68rem;color:#64748b;text-transform:uppercase;letter-spacing:.04em}}
-    .agg-stat .value{{font-size:1.1rem;font-weight:700;color:#e2e8f0;margin-top:2px}}
-    .agg-stat .value.high{{color:#4ade80}}.agg-stat .value.mid{{color:#facc15}}.agg-stat .value.low{{color:#f87171}}
-    #group-count{{padding:12px 28px 0;font-size:0.85rem;color:#94a3b8;font-style:italic}}
-    #player-count{{padding:8px 28px 0;font-size:0.78rem;color:#64748b}}
-    .table-wrap{{padding:16px 28px 28px;overflow-x:auto}}
-    table{{width:100%;border-collapse:collapse;font-size:0.82rem}}
-    thead tr{{background:#1e293b}}
-    th{{padding:9px 12px;text-align:left;color:#94a3b8;font-weight:600;font-size:0.7rem;text-transform:uppercase;letter-spacing:.05em;white-space:nowrap;cursor:pointer;user-select:none}}
-    th:hover{{color:#c7d2fe}}
-    th .arr{{margin-left:3px;opacity:.4}}
-    th.sorted .arr{{opacity:1;color:#818cf8}}
-    td{{padding:8px 12px;border-bottom:1px solid #1e293b;white-space:nowrap}}
-    tr:hover td{{background:#1e293b66}}
-    .badge{{display:inline-block;padding:2px 7px;border-radius:4px;font-size:0.68rem;font-weight:700}}
-    .pos-Goalkeeper{{background:#164e63;color:#67e8f9}}
-    .pos-Defender{{background:#14532d;color:#86efac}}
-    .pos-Midfielder{{background:#312e81;color:#a5b4fc}}
-    .pos-Forward{{background:#7f1d1d;color:#fca5a5}}
-    .score-val{{font-weight:700}}
-    .high{{color:#4ade80}}.mid{{color:#facc15}}.low{{color:#f87171}}
-    .no-data{{text-align:center;padding:60px;color:#475569}}
-    .player-card{{margin:16px 28px;background:#1e293b;border-radius:8px;padding:20px}}
-    .player-card h2{{font-size:1.1rem;font-weight:700;color:#f1f5f9;margin-bottom:4px}}
-    .player-card .meta{{font-size:0.8rem;color:#64748b;margin-bottom:16px}}
-    .range-tabs{{display:flex;gap:6px;margin-bottom:16px}}
-    .range-tab{{padding:5px 14px;border-radius:5px;cursor:pointer;font-size:0.8rem;font-weight:600;background:#0f172a;border:1px solid #334155;color:#64748b;transition:all .15s}}
-    .range-tab.active{{background:#6366f1;border-color:#6366f1;color:#fff}}
-    .stats-grid{{display:grid;grid-template-columns:repeat(auto-fill,minmax(130px,1fr));gap:8px}}
-    .stat-card{{background:#0f172a;border-radius:6px;padding:10px 12px}}
-    .stat-card .slabel{{font-size:0.68rem;color:#64748b;text-transform:uppercase;letter-spacing:.04em}}
-    .stat-card .sval{{font-size:1.15rem;font-weight:700;color:#e2e8f0;margin-top:3px}}
-    .empty-state{{text-align:center;padding:60px 28px;color:#475569}}
-    #pagination{{display:flex;align-items:center;justify-content:center;gap:12px;padding:16px 0 8px}}
-    .pag-btn{{background:#1e293b;border:1px solid #334155;color:#94a3b8;padding:6px 16px;border-radius:5px;cursor:pointer;font-size:0.82rem;transition:all .15s}}
-    .pag-btn:hover:not([disabled]){{border-color:#6366f1;color:#a5b4fc}}
-    .pag-btn[disabled]{{opacity:.35;cursor:default}}
-    .pag-info{{font-size:0.82rem;color:#64748b}}
-  </style>
-</head>
-<body>
-
-<header>
-  <h1>Sorare Stats Dashboard</h1>
-  <span id="last-updated"></span>
-</header>
-
-<div class="tabs">
-  <div class="tab active" data-tab="group">Vue groupe</div>
-  <div class="tab" data-tab="player">Vue joueur</div>
-</div>
-
-<!-- GROUP VIEW -->
-<div id="tab-group" class="tab-content active">
-  <div class="controls">
-    <div class="filter-group">
-      <span class="filter-label">Range</span>
-      <select id="range-select" class="filter-select">
-        <option value="10">10 matchs</option>
-        <option value="5">5 matchs</option>
-        <option value="40">40 matchs</option>
-      </select>
-    </div>
-    <div class="filter-group">
-      <span class="filter-label">Poste</span>
-      <div class="multi-wrap" id="pos-wrap">
-        <div class="multi-trigger" id="pos-trigger">Tous</div>
-        <div class="multi-dropdown">
-          <label class="multi-option all-opt"><input type="checkbox" id="pos-all" checked> Tous</label>
-          <label class="multi-option"><input type="checkbox" value="Goalkeeper"> Gardien</label>
-          <label class="multi-option"><input type="checkbox" value="Defender"> Défenseur</label>
-          <label class="multi-option"><input type="checkbox" value="Midfielder"> Milieu</label>
-          <label class="multi-option"><input type="checkbox" value="Forward"> Attaquant</label>
-        </div>
-      </div>
-    </div>
-    <div class="filter-group">
-      <span class="filter-label">Championnat</span>
-      <div class="multi-wrap" id="comp-wrap">
-        <div class="multi-trigger" id="comp-trigger">Tous</div>
-        <div class="multi-dropdown">
-          <label class="multi-option all-opt"><input type="checkbox" id="comp-all" checked> Tous</label>
-          {comp_checkboxes}
-        </div>
-      </div>
-    </div>
-    <div class="filter-group" id="club-filter-group">
-      <span class="filter-label">Club</span>
-      <div class="multi-wrap" id="club-wrap">
-        <div class="multi-trigger" id="club-trigger">Tous</div>
-        <div class="multi-dropdown" id="club-dropdown">
-          <div class="club-search-wrap"><input type="text" id="club-search-input" placeholder="Rechercher un club…" autocomplete="off"/></div>
-          <div id="club-checkbox-list">
-            <label class="multi-option all-opt"><input type="checkbox" id="club-all" checked> Tous</label>
-          </div>
-        </div>
-      </div>
-    </div>
-    <div class="filter-group slider-group">
-      <span class="filter-label">Min. jouées</span>
-      <input type="range" id="mins-slider" min="0" max="90" value="0" step="5"/>
-      <span class="slider-val" id="mins-val">≥ 0 min</span>
-    </div>
-    <div class="filter-group">
-      <span class="filter-label">Agrégation</span>
-      <button class="filter-btn agg-btn active" data-agg="mean">Moyenne</button>
-      <button class="filter-btn agg-btn" data-agg="median">Médiane</button>
-      <button class="filter-btn agg-btn" data-agg="top10">Top 10%</button>
-      <button class="filter-btn agg-btn" data-agg="top20">Top 20%</button>
-    </div>
-  </div>
-
-  <div id="group-count"></div>
-
-  <div class="aggregate-box" id="agg-box">
-    <h3 id="agg-title">Moyenne du groupe</h3>
-    <div class="agg-stats" id="agg-stats"></div>
-  </div>
-
-  <div class="table-wrap">
-    <table>
-      <thead id="group-thead"></thead>
-      <tbody id="group-tbody"></tbody>
-    </table>
-    <div id="group-no-data" class="no-data" style="display:none">Aucun joueur trouvé</div>
-    <div id="pagination"></div>
-  </div>
-</div>
-
-<!-- PLAYER VIEW -->
-<div id="tab-player" class="tab-content">
-  <div class="search-wrap">
-    <input id="player-search" type="text" placeholder="Rechercher un joueur par nom…"/>
-  </div>
-  <div id="player-count"></div>
-  <div id="player-results"></div>
-</div>
-
-<script>
-const DATA = {data_json};
-const STAT_LABELS = {stat_labels_js};
-const ALL_STATS = ["score", {', '.join(f'"{f}"' for f in STAT_TYPES)}];
-const POS_LABELS = {{Goalkeeper:'Gardien',Defender:'Défenseur',Midfielder:'Milieu',Forward:'Attaquant'}};
-
-document.getElementById('last-updated').textContent = 'Mis à jour : ' + DATA.last_updated;
-
-// ── State ──────────────────────────────────────────────────
-let activeTab = 'group';
-let activeRange = 10;
-let selectedPos = new Set();   // empty = tous
-let selectedComp = new Set();  // empty = tous
-let selectedClub = new Set();  // empty = tous
-let minMins = 0;
-let aggMode = 'mean';
-let sortCol = 'score';
-let sortDir = -1;
-let playerSearch = '';
-let playerSortRange = 10;
-let currentPage = 1;
-const PAGE_SIZE = 100;
-
-// ── Tab switching ─────────────────────────────────────────
-document.querySelectorAll('.tab').forEach(t => {{
-  t.addEventListener('click', () => {{
-    activeTab = t.dataset.tab;
-    document.querySelectorAll('.tab').forEach(x => x.classList.remove('active'));
-    t.classList.add('active');
-    document.querySelectorAll('.tab-content').forEach(x => x.classList.remove('active'));
-    document.getElementById('tab-' + activeTab).classList.add('active');
-    if (activeTab === 'group') renderGroup();
-    else renderPlayer();
-  }});
-}});
-
-// ── Helpers ───────────────────────────────────────────────
-function fmt(v) {{ return (v === null || v === undefined) ? '—' : v; }}
-
-function scoreClass(v) {{
-  if (v === null || v === undefined) return '';
-  if (v >= 60) return 'high'; if (v >= 40) return 'mid'; return 'low';
-}}
-
-function avg(arr) {{
-  const vals = arr.filter(v => v !== null && v !== undefined);
-  if (!vals.length) return null;
-  return Math.round((vals.reduce((a,b)=>a+b,0)/vals.length)*100)/100;
-}}
-
-function median(arr) {{
-  const vals = arr.filter(v => v !== null && v !== undefined).sort((a,b)=>a-b);
-  if (!vals.length) return null;
-  const m = Math.floor(vals.length/2);
-  const r = vals.length%2 ? vals[m] : (vals[m-1]+vals[m])/2;
-  return Math.round(r*100)/100;
-}}
-
-function topPct(arr, pct) {{
-  const vals = arr.filter(v => v !== null && v !== undefined).sort((a,b)=>b-a);
-  if (!vals.length) return null;
-  const n = Math.max(1, Math.round(vals.length * pct));
-  const top = vals.slice(0, n);
-  return Math.round((top.reduce((a,b)=>a+b,0)/top.length)*100)/100;
-}}
-
-function aggregate(arr) {{
-  if (aggMode === 'median') return median(arr);
-  if (aggMode === 'top10') return topPct(arr, 0.10);
-  if (aggMode === 'top20') return topPct(arr, 0.20);
-  return avg(arr);
-}}
-
-const AGG_LABELS = {{ mean:'Moyenne du groupe', median:'Médiane du groupe', top10:'Top 10% du groupe', top20:'Top 20% du groupe' }};
-
-// ── Group view ────────────────────────────────────────────
-function filteredPlayers() {{
-  return DATA.players.filter(p => {{
-    if (selectedPos.size > 0 && !selectedPos.has(p.position)) return false;
-    if (selectedComp.size > 0 && !selectedComp.has(p.comp_slug)) return false;
-    if (selectedClub.size > 0 && !selectedClub.has(p.club)) return false;
-    if (minMins > 0) {{
-      const s = (p.stats && p.stats[String(activeRange)]) || {{}};
-      if ((s.MINS_PLAYED || 0) < minMins) return false;
-    }}
-    return true;
-  }});
-}}
-
-// Club dropdown — trigger & close listeners attached once
-const clubWrap = document.getElementById('club-wrap');
-const clubTrigger = document.getElementById('club-trigger');
-clubTrigger.addEventListener('click', e => {{ e.stopPropagation(); clubWrap.classList.toggle('open'); }});
-document.addEventListener('click', e => {{ if (!clubWrap.contains(e.target)) clubWrap.classList.remove('open'); }});
-
-// Club search — set up once, filters visible labels inside the checkbox list
-const clubSearchInput = document.getElementById('club-search-input');
-clubSearchInput.addEventListener('click', e => e.stopPropagation());
-clubSearchInput.addEventListener('input', () => {{
-  const q = clubSearchInput.value.toLowerCase();
-  document.querySelectorAll('#club-checkbox-list .multi-option:not(.all-opt)').forEach(lbl => {{
-    lbl.style.display = lbl.textContent.toLowerCase().includes(q) ? '' : 'none';
-  }});
-}});
-
-function refreshClubTrigger() {{
-  if (selectedClub.size === 0) {{
-    clubTrigger.textContent = 'Tous'; clubTrigger.classList.remove('has-selection');
-  }} else {{
-    clubTrigger.textContent = selectedClub.size <= 2 ? [...selectedClub].join(', ') : selectedClub.size + ' sélectionnés';
-    clubTrigger.classList.add('has-selection');
-  }}
-}}
-
-function updateClubFilter() {{
-  // Show clubs from selected competitions, or all competitions if none selected
-  const comps = selectedComp.size > 0 ? [...selectedComp] : null;
-  const clubs = [...new Set(
-    DATA.players.filter(p => !comps || comps.includes(p.comp_slug)).map(p => p.club)
-  )].sort();
-
-  // Preserve current selection — only rebuild the checkbox list, not the whole dropdown
-  const prevSelected = new Set(selectedClub);
-  const checkboxList = document.getElementById('club-checkbox-list');
-
-  checkboxList.innerHTML =
-    `<label class="multi-option all-opt"><input type="checkbox" id="club-all"> Tous</label>` +
-    clubs.map(c => `<label class="multi-option"><input type="checkbox" value="${{c}}"${{prevSelected.has(c) ? ' checked' : ''}}> ${{c}}</label>`).join('');
-
-  // Update selectedClub to only keep clubs still in the list
-  selectedClub.clear();
-  prevSelected.forEach(c => {{ if (clubs.includes(c)) selectedClub.add(c); }});
-
-  const allCb = document.getElementById('club-all');
-  allCb.checked = selectedClub.size === 0;
-  refreshClubTrigger();
-
-  allCb.addEventListener('change', () => {{
-    if (allCb.checked) {{
-      selectedClub.clear();
-      checkboxList.querySelectorAll('input[type=checkbox]:not(#club-all)').forEach(cb => cb.checked = false);
-      refreshClubTrigger();
-      resetAndRender();
-    }}
-  }});
-
-  checkboxList.querySelectorAll('input[type=checkbox]:not(#club-all)').forEach(cb => {{
-    cb.addEventListener('change', () => {{
-      if (cb.checked) {{ selectedClub.add(cb.value); allCb.checked = false; }}
-      else {{ selectedClub.delete(cb.value); if (selectedClub.size === 0) allCb.checked = true; }}
-      refreshClubTrigger();
-      resetAndRender();
-    }});
-  }});
-}}
-
-function getStats(p) {{
-  return (p.stats && p.stats[String(activeRange)]) || null;
-}}
-
-function renderGroup() {{
-  const players = filteredPlayers();
-  const posLabel = selectedPos.size === 0 ? 'joueurs' : [...selectedPos].map(v=>POS_LABELS[v]).join(', ');
-  const compLabel = selectedComp.size === 0 ? 'tous championnats confondus'
-    : [...selectedComp].map(v => (DATA.players.find(p=>p.comp_slug===v)||{{}}).comp_name || v).join(', ');
-  const sampleSentence = `Ce résultat prend en compte ${{players.length}} ${{posLabel}} (${{compLabel}}, ${{activeRange}} derniers matchs)`;
-  document.getElementById('group-count').textContent = sampleSentence;
-
-  // Aggregate
-  const aggStats = {{}};
-  for (const field of ALL_STATS) {{
-    aggStats[field] = aggregate(players.map(p => {{ const s=getStats(p); return s?s[field]:null; }}));
-  }}
-  document.getElementById('agg-title').textContent = AGG_LABELS[aggMode];
-  const aggEl = document.getElementById('agg-stats');
-  aggEl.innerHTML = '';
-  for (const field of ALL_STATS) {{
-    if (aggStats[field] === null) continue;
-    const cls = field==='score' ? scoreClass(aggStats[field]) : '';
-    aggEl.insertAdjacentHTML('beforeend',
-      `<div class="agg-stat"><div class="label">${{STAT_LABELS[field]||field}}</div><div class="value ${{cls}}">${{aggStats[field]}}</div></div>`
-    );
-  }}
-
-  const DIRECT_COLS = new Set(['name','club','position','comp_name','age','l10_score']);
-
-  function getSortVal(p, col) {{
-    if (col === 'age') return p.age ?? null;
-    if (col === 'l10_score') return (p.stats && p.stats['10'] && p.stats['10'].score) ?? null;
-    if (DIRECT_COLS.has(col)) return p[col] ?? null;
-    const s = getStats(p);
-    return s ? (s[col] ?? null) : null;
-  }}
-
-  // Sort players
-  const sorted = [...players].sort((a,b) => {{
-    const av = getSortVal(a, sortCol), bv = getSortVal(b, sortCol);
-    if (av===null && bv===null) return 0;
-    if (av===null) return 1; if (bv===null) return -1;
-    return av<bv ? sortDir : av>bv ? -sortDir : 0;
-  }});
-
-  // Header
-  const thead = document.getElementById('group-thead');
-  thead.innerHTML = '<tr>' + [
-    ['name','Joueur'], ['club','Club'], ['position','Poste'], ['comp_name','Championnat'],
-    ['age','Âge'], ['l10_score','Score L10'],
-    ...ALL_STATS.map(f => [f, STAT_LABELS[f]||f])
-  ].map(([col,lbl]) => {{
-    const isSorted = col === sortCol;
-    return `<th data-col="${{col}}" class="${{isSorted?'sorted':''}}">${{lbl}} <span class="arr">${{isSorted?(sortDir===-1?'↓':'↑'):'↕'}}</span></th>`;
-  }}).join('') + '</tr>';
-
-  thead.querySelectorAll('th').forEach(th => {{
-    th.addEventListener('click', () => {{
-      if (sortCol === th.dataset.col) sortDir *= -1;
-      else {{ sortCol = th.dataset.col; sortDir = -1; }}
-      renderGroup();
-    }});
-  }});
-
-  // Body — paginated
-  const tbody = document.getElementById('group-tbody');
-  if (!sorted.length) {{
-    tbody.innerHTML = '';
-    document.getElementById('group-no-data').style.display='';
-    document.getElementById('pagination').innerHTML = '';
-    return;
-  }}
-  document.getElementById('group-no-data').style.display='none';
-
-  const totalPages = Math.ceil(sorted.length / PAGE_SIZE);
-  if (currentPage > totalPages) currentPage = totalPages;
-  const pageStart = (currentPage - 1) * PAGE_SIZE;
-  const pageRows  = sorted.slice(pageStart, pageStart + PAGE_SIZE);
-
-  tbody.innerHTML = pageRows.map(p => {{
-    const s = getStats(p);
-    const l10 = (p.stats && p.stats['10'] && p.stats['10'].score) ?? null;
-    return `<tr>
-      <td>${{p.name}}</td>
-      <td>${{p.club}}</td>
-      <td><span class="badge pos-${{p.position}}">${{POS_LABELS[p.position]||p.position}}</span></td>
-      <td>${{p.comp_name}}</td>
-      <td>${{fmt(p.age)}}</td>
-      <td><span class="score-val ${{scoreClass(l10)}}">${{fmt(l10)}}</span></td>
-      ${{ALL_STATS.map(f => {{
-        const v = s?s[f]:null;
-        const cls = f==='score' ? 'score-val '+scoreClass(v) : '';
-        return `<td><span class="${{cls}}">${{fmt(v)}}</span></td>`;
-      }}).join('')}}
-    </tr>`;
-  }}).join('');
-
-  // Pagination controls
-  const pag = document.getElementById('pagination');
-  if (totalPages <= 1) {{ pag.innerHTML = ''; return; }}
-  const from = pageStart + 1, to = Math.min(pageStart + PAGE_SIZE, sorted.length);
-  pag.innerHTML = `
-    <button class="pag-btn" id="pag-prev" ${{currentPage===1?'disabled':''}}>‹ Préc.</button>
-    <span class="pag-info">${{from}}–${{to}} sur ${{sorted.length}}</span>
-    <button class="pag-btn" id="pag-next" ${{currentPage===totalPages?'disabled':''}}>Suiv. ›</button>`;
-  document.getElementById('pag-prev').addEventListener('click', () => {{ currentPage--; renderGroup(); window.scrollTo(0,0); }});
-  document.getElementById('pag-next').addEventListener('click', () => {{ currentPage++; renderGroup(); window.scrollTo(0,0); }});
-}}
-
-// ── Player view ───────────────────────────────────────────
-function renderPlayer() {{
-  const q = playerSearch.toLowerCase().trim();
-  const results = document.getElementById('player-results');
-  const countEl = document.getElementById('player-count');
-
-  if (!q) {{
-    countEl.textContent = '';
-    results.innerHTML = '<div class="empty-state">Tapez un nom pour rechercher un joueur</div>';
-    return;
-  }}
-
-  // Deduplicate by slug
-  const seen = new Set();
-  const matched = DATA.players.filter(p => {{
-    if (!p.name.toLowerCase().includes(q)) return false;
-    if (seen.has(p.slug)) return false;
-    seen.add(p.slug);
-    return true;
-  }});
-
-  countEl.textContent = matched.length + ' résultat' + (matched.length>1?'s':'');
-
-  if (!matched.length) {{
-    results.innerHTML = '<div class="empty-state">Aucun joueur trouvé</div>';
-    return;
-  }}
-
-  results.innerHTML = matched.map(p => {{
-    const comps = DATA.players.filter(x=>x.slug===p.slug).map(x=>x.comp_name);
-    const uniqueComps = [...new Set(comps)].join(', ');
-    return `<div class="player-card">
-      <h2>${{p.name}}</h2>
-      <div class="meta">
-        <span class="badge pos-${{p.position}}">${{POS_LABELS[p.position]||p.position}}</span>
-        &nbsp;${{p.club}} &nbsp;·&nbsp; ${{uniqueComps}}
-      </div>
-      <div class="range-tabs" data-slug="${{p.slug}}">
-        ${{[5,10,40].map(n=>`<div class="range-tab ${{n===10?'active':''}}" data-n="${{n}}">${{n}} matchs</div>`).join('')}}
-      </div>
-      <div class="stats-grid" id="sg-${{p.slug}}">
-        ${{renderStatsGrid(p.stats, 10)}}
-      </div>
-    </div>`;
-  }}).join('');
-
-  results.querySelectorAll('.range-tab').forEach(tab => {{
-    tab.addEventListener('click', () => {{
-      const card = tab.closest('.player-card');
-      const slug = card.querySelector('.range-tabs').dataset.slug;
-      const n = parseInt(tab.dataset.n);
-      card.querySelectorAll('.range-tab').forEach(t=>t.classList.remove('active'));
-      tab.classList.add('active');
-      const player = DATA.players.find(p=>p.slug===slug);
-      document.getElementById('sg-'+slug).innerHTML = renderStatsGrid(player.stats, n);
-    }});
-  }});
-}}
-
-function renderStatsGrid(stats, n) {{
-  const s = stats && stats[String(n)];
-  if (!s) return '<div style="color:#475569;font-size:.85rem">Pas de données pour cette range</div>';
-  return ALL_STATS.map(f => {{
-    if (s[f]===null||s[f]===undefined) return '';
-    return `<div class="stat-card"><div class="slabel">${{STAT_LABELS[f]||f}}</div><div class="sval">${{s[f]}}</div></div>`;
-  }}).join('');
-}}
-
-// ── Event listeners ───────────────────────────────────────
-// Any filter change resets to page 1
-function resetAndRender() {{ currentPage = 1; renderGroup(); }}
-
-document.getElementById('range-select').addEventListener('change', e => {{
-  activeRange = parseInt(e.target.value);
-  resetAndRender();
-}});
-
-// ── Multi-select helper ───────────────────────────────────
-function setupMulti(wrapId, allCheckId, triggerId, state, labelFn) {{
-  const wrap = document.getElementById(wrapId);
-  const trigger = document.getElementById(triggerId);
-  const allCb = document.getElementById(allCheckId);
-  const itemCbs = [...wrap.querySelectorAll('.multi-dropdown input[type=checkbox]:not(#' + allCheckId + ')')];
-
-  function updateTrigger() {{
-    if (state.size === 0) {{
-      trigger.textContent = 'Tous';
-      trigger.classList.remove('has-selection');
-    }} else {{
-      const labels = [...state].map(labelFn);
-      trigger.textContent = labels.length <= 2 ? labels.join(', ') : labels.length + ' sélectionnés';
-      trigger.classList.add('has-selection');
-    }}
-  }}
-
-  trigger.addEventListener('click', e => {{
-    e.stopPropagation();
-    wrap.classList.toggle('open');
-  }});
-
-  allCb.addEventListener('change', () => {{
-    if (allCb.checked) {{
-      state.clear();
-      itemCbs.forEach(cb => cb.checked = false);
-      updateTrigger();
-      resetAndRender();
-    }}
-  }});
-
-  itemCbs.forEach(cb => {{
-    cb.addEventListener('change', () => {{
-      if (cb.checked) {{ state.add(cb.value); allCb.checked = false; }}
-      else {{ state.delete(cb.value); if (state.size === 0) allCb.checked = true; }}
-      updateTrigger();
-      resetAndRender();
-    }});
-  }});
-
-  document.addEventListener('click', e => {{
-    if (!wrap.contains(e.target)) wrap.classList.remove('open');
-  }});
-}}
-
-setupMulti('pos-wrap', 'pos-all', 'pos-trigger', selectedPos,
-  v => ({{Goalkeeper:'Gardien',Defender:'Défenseur',Midfielder:'Milieu',Forward:'Attaquant'}})[v] || v);
-
-setupMulti('comp-wrap', 'comp-all', 'comp-trigger', selectedComp,
-  v => (DATA.players.find(p=>p.comp_slug===v)||{{}}).comp_name || v);
-
-// Group checkbox behaviour (shared)
-function setupCompGroup(groupId) {{
-  const groupCb = document.getElementById(groupId);
-  if (!groupCb) return;
-  const groupSlugs = groupCb.dataset.group.split(' ').filter(Boolean);
-  const subCbs = groupSlugs.map(slug =>
-    document.querySelector(`#comp-wrap input[value="${{slug}}"]`)
-  ).filter(Boolean);
-
-  function refreshTrigger() {{
-    const trigger = document.getElementById('comp-trigger');
-    if (selectedComp.size === 0) {{
-      trigger.textContent = 'Tous'; trigger.classList.remove('has-selection');
-    }} else {{
-      const labels = [...selectedComp].map(v=>(DATA.players.find(p=>p.comp_slug===v)||{{}}).comp_name||v);
-      trigger.textContent = labels.length <= 2 ? labels.join(', ') : labels.length + ' sélectionnés';
-      trigger.classList.add('has-selection');
-    }}
-  }}
-
-  groupCb.addEventListener('change', () => {{
-    subCbs.forEach(cb => {{
-      cb.checked = groupCb.checked;
-      if (groupCb.checked) selectedComp.add(cb.value);
-      else selectedComp.delete(cb.value);
-    }});
-    document.getElementById('comp-all').checked = selectedComp.size === 0;
-    refreshTrigger();
-    resetAndRender();
-  }});
-
-  subCbs.forEach(cb => {{
-    cb.addEventListener('change', () => {{
-      groupCb.checked = subCbs.every(c => c.checked);
-      groupCb.indeterminate = !groupCb.checked && subCbs.some(c => c.checked);
-    }});
-  }});
-}}
-
-setupCompGroup('comp-contender');
-setupCompGroup('comp-challenger');
-
-// Refresh club filter whenever competition changes
-document.querySelectorAll('#comp-wrap input[type=checkbox]').forEach(cb => {{
-  cb.addEventListener('change', () => updateClubFilter());
-}});
-updateClubFilter();
-
-document.querySelectorAll('.agg-btn').forEach(btn => {{
-  btn.addEventListener('click', () => {{
-    document.querySelectorAll('.agg-btn').forEach(b=>b.classList.remove('active'));
-    btn.classList.add('active');
-    aggMode = btn.dataset.agg;
-    resetAndRender();
-  }});
-}});
-
-document.getElementById('mins-slider').addEventListener('input', e => {{
-  minMins = parseInt(e.target.value);
-  document.getElementById('mins-val').textContent = '≥ ' + minMins + ' min';
-  resetAndRender();
-}});
-
-document.getElementById('player-search').addEventListener('input', e => {{
-  playerSearch = e.target.value;
-  renderPlayer();
-}});
-
-renderGroup();
-</script>
-</body>
-</html>"""
+            scopes[c] = [g for g in games if g["comp"] == c]
+        intl = [g for g in games if g["intl"]]
+        if intl:
+            scopes[INTL] = intl
+        for scope, gs in scopes.items():
+            blocks = []
+            prev = None
+            for n in RANGES:
+                b = compute_block(gs, n, meta["position"])
+                # 0 = identique à la range précédente (joueur avec moins de n matchs) : allège le fichier
+                blocks.append(0 if (b is not None and prev is not None and b == prev) else b)
+                prev = b
+            if blocks[0] is None:
+                continue
+            rows.append([idx, scope, *blocks])
+
+    comps_out = [[slug, name, "contender" if slug in CONTENDER_SLUGS else
+                  "challenger" if slug in CHALLENGER_SLUGS else ""]
+                 for slug, name in competitions.items()]
+    print(f"Done — {len(players_out)} players, {len(rows)} rows", flush=True)
+    return {
+        "last_updated": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC"),
+        "depth": depth_info,
+        "ranges": RANGES,
+        "stats": [[k, label, cat, "match" if k in PER_MATCH else "90"] for k, label, cat in STATS],
+        "comps": comps_out,
+        "players": players_out,
+        "rows": rows,
+    }
 
 
 if __name__ == "__main__":
-    players, competitions = main()
-    last_updated = datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
-    html = generate_html(players, competitions, last_updated)
-    with open("index.html", "w", encoding="utf-8") as f:
-        f.write(html)
-    print(f"\nDone — {len(players)} entries, {len(set(p['slug'] for p in players))} unique players → index.html", flush=True)
+    out = main()
+    with open(OUTPUT, "w", encoding="utf-8") as f:
+        json.dump(out, f, ensure_ascii=False, separators=(",", ":"))
+    print(f"→ {OUTPUT} ({os.path.getsize(OUTPUT) / 1e6:.1f} Mo)", flush=True)
